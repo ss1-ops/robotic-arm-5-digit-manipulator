@@ -1,0 +1,6 @@
+[submodule "mujoco_playground"]
+	path = sim_rl/mujoco_playground
+	url = https://github.com/google-deepmind/mujoco_playground.git
+[submodule "simulation"]
+	path = sim_rl/simulation
+	url = https://github.com/TetherIA/aero-open-sim.git

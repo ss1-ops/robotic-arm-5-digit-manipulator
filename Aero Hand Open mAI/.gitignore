@@ -1,0 +1,8 @@
+# Ignore typical build artifacts
+__pycache__/
+*.pyc
+build/
+.colcon/
+.DS_Store
+
+.vscode/

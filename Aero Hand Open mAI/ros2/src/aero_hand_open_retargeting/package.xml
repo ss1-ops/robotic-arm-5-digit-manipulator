@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>aero_hand_open_retargeting</name>
+  <version>0.0.0</version>
+  <description>TODO: Package description</description>
+  <maintainer email="mohityadav@tetheria.ai">mohit</maintainer>
+  <license>TODO: License declaration</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>ament_index_python</depend>
+  <depend>tf_transformations</depend>
+  <depend>aero_hand_open_msgs</depend>
+  <depend>aero_hand_open</depend>
+  <depend>aero_hand_open_description</depend>
+  <depend>manus_ros2</depend>
+  <depend>manus_ros2_msgs</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
