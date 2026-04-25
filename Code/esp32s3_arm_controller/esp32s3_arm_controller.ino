@@ -36,16 +36,16 @@ const uint16_t agent_port = 8888;
 WebServer server(80);
 
 // --- Stepper pins ---
-#define WAIST_STEP_PIN        5
-#define WAIST_DIR_PIN         4
-#define SHOULDER_STEP_PIN     7
-#define SHOULDER_DIR_PIN      6
-#define ELBOW_STEP_PIN        9
-#define ELBOW_DIR_PIN         8
-#define WRIST_ROLL_STEP_PIN   11
-#define WRIST_ROLL_DIR_PIN    10
-#define WRIST_PITCH_STEP_PIN  13
-#define WRIST_PITCH_DIR_PIN   12
+#define WAIST_STEP_PIN        4
+#define WAIST_DIR_PIN         3
+#define SHOULDER_STEP_PIN     6
+#define SHOULDER_DIR_PIN      5
+#define ELBOW_STEP_PIN        8
+#define ELBOW_DIR_PIN         7
+#define WRIST_ROLL_STEP_PIN   10
+#define WRIST_ROLL_DIR_PIN    9
+#define WRIST_PITCH_STEP_PIN  12
+#define WRIST_PITCH_DIR_PIN   11
 
 // ================== PER-JOINT STEPPER CONSTANTS ==================
 //                          Waist  Shoulder  Elbow  WristRoll  WristPitch
