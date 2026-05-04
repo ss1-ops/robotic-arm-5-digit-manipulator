@@ -21,6 +21,7 @@ uint32_t loopTaskStackSize = 16384;
 #include <rclc/rclc.h>
 #include <rclc/executor.h>
 #include <sensor_msgs/msg/joint_state.h>
+#include <std_msgs/msg/float32.h>
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -57,15 +58,29 @@ const float   BELT_RATIO[5]   = {14.45625f,    5.11875f,      4.65304275f,   1.0
 float steps_per_rad[5];
 unsigned long step_interval_us[5];
 
-const float ANGULAR_SPEED_RAD_S = 1.0;
+const float MAX_SPEED_RAD_S = 1.0;   // top speed — set this to the fastest safe value
+float       speed_scale    = 1.0f;  // runtime 0.0–1.0; updated via /speed_scale topic
 
 float current_pos[5] = {0.0};
 float target_pos[5]  = {0.0};
 unsigned long last_step_time[5] = {0};
 
+// ================== Sinusoidal ramp state ==================
+// Each move's velocity follows v(s) = v_max * sin(π * s/S),
+// giving smooth acceleration from rest and deceleration to rest.
+// RAMP_MIN_V clamps the start/end fraction to avoid infinite intervals.
+#define RAMP_MIN_V      0.05f   // 5% of peak speed at start/end
+// RAMP_EXPONENT < 1.0 sharpens the tails: the motor reaches full speed
+// faster and lingers there longer.  1.0 = pure sine; 0.3 = very snappy.
+#define RAMP_EXPONENT   0.35f
+float ramp_total[5] = {1.0f}; // total steps in current move segment
+float ramp_done[5]  = {0.0f}; // steps issued so far in this segment
+
 // ================== micro-ROS ==================
 rcl_subscription_t subscriber;
+rcl_subscription_t speed_subscriber;
 sensor_msgs__msg__JointState joint_state_msg;
+std_msgs__msg__Float32       speed_msg;
 rclc_executor_t executor;
 rclc_support_t support;
 rcl_allocator_t allocator;
@@ -106,15 +121,30 @@ void joint_state_callback(const void* msgin) {
   for (size_t i = 0; i < n; i++) {
     float tgt = (float)msg->position.data[i];
     float err = tgt - current_pos[i];
-    float steps = err * steps_per_rad[i];
+    float steps = fabsf(err * steps_per_rad[i]);
     Serial.printf("  j%zu: cur=%.3f tgt=%.3f err=%.3f steps=%.1f\n",
                   i + 1, current_pos[i], tgt, err, steps);
+    // Reset ramp whenever a new move requires at least 1 step
+    if (steps >= 1.0f) {
+      ramp_total[i] = steps;
+      ramp_done[i]  = 0.0f;
+    }
     target_pos[i] = tgt;
   }
 }
 
+void speed_callback(const void* msgin) {
+  const std_msgs__msg__Float32* msg = (const std_msgs__msg__Float32*)msgin;
+  float s = msg->data;
+  if (s < 0.0f) s = 0.0f;
+  if (s > 1.0f) s = 1.0f;
+  speed_scale = s;
+  Serial.printf("[SPEED] scale=%.2f\n", speed_scale);
+}
+
 void uros_cleanup() {
   RCSOFTCHECK(rclc_executor_fini(&executor));
+  RCSOFTCHECK(rcl_subscription_fini(&speed_subscriber, &node));
   RCSOFTCHECK(rcl_subscription_fini(&subscriber, &node));
   RCSOFTCHECK(rcl_node_fini(&node));
   RCSOFTCHECK(rclc_support_fini(&support));
@@ -149,10 +179,18 @@ void uros_init() {
     js_names[i].capacity = 32;
   }
 
-  RCCHECK(rclc_executor_init(&executor, &support.context, 1, &allocator));
+  RCCHECK(rclc_subscription_init_best_effort(
+    &speed_subscriber, &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+    "/speed_scale"));
+
+  RCCHECK(rclc_executor_init(&executor, &support.context, 2, &allocator));
   RCCHECK(rclc_executor_add_subscription(
     &executor, &subscriber, &joint_state_msg,
     &joint_state_callback, ON_NEW_DATA));
+  RCCHECK(rclc_executor_add_subscription(
+    &executor, &speed_subscriber, &speed_msg,
+    &speed_callback, ON_NEW_DATA));
 
   uros_ok = true;
   Serial.printf("[uROS] init OK @ %lu ms\n", millis());
@@ -171,7 +209,7 @@ void setup() {
 
   for (int i = 0; i < 5; i++) {
     steps_per_rad[i]    = (MICROSTEPS[i] * GEAR_RATIO[i] * BELT_RATIO[i] / DEG_PER_STEP[i]) * (180.0f / PI);
-    step_interval_us[i] = (unsigned long)(1e6f / (ANGULAR_SPEED_RAD_S * steps_per_rad[i]));
+    step_interval_us[i] = (unsigned long)(1e6f / (MAX_SPEED_RAD_S * steps_per_rad[i]));
   }
 
   // Connect WiFi and configure micro-ROS UDP transport to Pi agent
@@ -265,15 +303,25 @@ void loop() {
   { unsigned long _st = micros();
   for (int i = 0; i < 5; i++) {
     unsigned long now = micros();
-    if (now - last_step_time[i] < step_interval_us[i]) { dbg_steps_skipped[i]++; continue; }
+    // Sinusoidal ramp: slow at start, peak in middle, slow at end
+    {
+      float _prog = (ramp_total[i] > 0.0f) ? (ramp_done[i] / ramp_total[i]) : 0.5f;
+      if (_prog > 0.999f) _prog = 0.999f;
+      float _vf = powf(sinf(PI * _prog), RAMP_EXPONENT);
+      if (_vf < RAMP_MIN_V) _vf = RAMP_MIN_V;
+      float _eff_scale = speed_scale < 0.01f ? 0.01f : speed_scale;
+      unsigned long ramp_interval_us = (unsigned long)(step_interval_us[i] / (_vf * _eff_scale));
+      if (now - last_step_time[i] < ramp_interval_us) { dbg_steps_skipped[i]++; continue; }
+    }
     float error = target_pos[i] - current_pos[i];
     float steps_needed = error * steps_per_rad[i];
     static bool was_moving[5] = {false};
     bool moving = fabs(steps_needed) >= 1.0f;
     if (moving != was_moving[i]) {
-      Serial.printf("[STEP] j%d %s | cur=%.3f tgt=%.3f steps=%.1f interval=%lu us\n",
+      Serial.printf("[STEP] j%d %s | cur=%.3f tgt=%.3f steps=%.1f prog=%.2f\n",
                     i+1, moving ? "START" : "STOP ",
-                    current_pos[i], target_pos[i], steps_needed, step_interval_us[i]);
+                    current_pos[i], target_pos[i], steps_needed,
+                    ramp_done[i] / max(ramp_total[i], 1.0f));
       was_moving[i] = moving;
     }
     if (fabs(steps_needed) >= 1.0f) {
@@ -292,6 +340,7 @@ void loop() {
         delayMicroseconds(2);
         digitalWrite(step_pin, LOW);
         current_pos[i] += (dir ? 1.0f : -1.0f) / steps_per_rad[i];
+        ramp_done[i]++;
         dbg_steps_issued[i]++;
       }
       last_step_time[i] = now;
