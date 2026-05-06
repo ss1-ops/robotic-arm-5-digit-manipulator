@@ -79,12 +79,16 @@ unsigned long last_step_time[5] = {0};
 // Each move's velocity follows v(s) = v_max * sin(π * s/S),
 // giving smooth acceleration from rest and deceleration to rest.
 // RAMP_MIN_V clamps the start/end fraction to avoid infinite intervals.
-#define RAMP_MIN_V      0.05f   // 5% of peak speed at start/end
-// RAMP_EXPONENT < 1.0 sharpens the tails: the motor reaches full speed
-// faster and lingers there longer.  1.0 = pure sine; 0.3 = very snappy.
-#define RAMP_EXPONENT   0.35f
+#define RAMP_MIN_V       0.25f  // minimum velocity fraction at start/end of move
+#define RAMP_ACCEL_FRAC  0.15f  // fraction of steps spent accelerating
+#define RAMP_DECEL_FRAC  0.15f  // fraction of steps spent decelerating
+// Velocity profile: linear ramp-up for ACCEL_FRAC, full speed for middle, linear ramp-down for DECEL_FRAC.
 float ramp_total[5] = {1.0f}; // total steps in current move segment
 float ramp_done[5]  = {0.0f}; // steps issued so far in this segment
+// Per-move speed fraction for each joint (0.0–1.0).
+// Set in joint_state_callback so all joints finish their move simultaneously:
+// the joint with the most steps runs at 1.0; all others are scaled down.
+float dynamic_speed_factor[5] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
 
 // ================== micro-ROS ==================
 rcl_subscription_t subscriber;
@@ -130,16 +134,39 @@ void joint_state_callback(const void* msgin) {
   if (n > 5) n = 5;
 
   Serial.printf("[CB] %lu ms | %zu joints\n", millis(), n);
+
+  // Pass 1: compute the time each joint needs at its own full speed.
+  // The joint that takes longest is the "pacemaker" — it runs at full speed;
+  // all others are slowed proportionally so everyone finishes simultaneously.
+  // Using time (steps × step_interval_us) instead of raw step count correctly
+  // accounts for joints that have different maximum speeds (JOINT_SPEED_FACTOR).
+  float steps_arr[5] = {0};
+  float time_arr[5]  = {0};
+  float max_time = 1.0f;
+  for (size_t i = 0; i < n; i++) {
+    float tgt = (float)msg->position.data[i];
+    steps_arr[i] = fabsf((tgt - current_pos[i]) * steps_per_rad[i]);
+    time_arr[i]  = steps_arr[i] * (float)step_interval_us[i];
+    if (time_arr[i] > max_time) max_time = time_arr[i];
+  }
+
+  // Pass 2: apply targets, ramp resets, and per-joint speed fractions.
   for (size_t i = 0; i < n; i++) {
     float tgt = (float)msg->position.data[i];
     float err = tgt - current_pos[i];
-    float steps = fabsf(err * steps_per_rad[i]);
+    float steps = steps_arr[i];
     Serial.printf("  j%zu: cur=%.3f tgt=%.3f err=%.3f steps=%.1f\n",
                   i + 1, current_pos[i], tgt, err, steps);
-    // Reset ramp whenever a new move requires at least 1 step
+    // Scale this joint's speed so it arrives at the same time as the slowest joint.
+    // dyn = time_i / max_time → step_interval becomes step_interval_i / dyn,
+    // so joint i's total time = steps_i * (step_interval_i / dyn) = max_time. ✓
+    dynamic_speed_factor[i] = (steps >= 1.0f) ? (time_arr[i] / max_time) : 1.0f;
+
+    // Ramp reset: if mid-move, skip re-acceleration by starting at peak velocity.
     if (steps >= 1.0f) {
+      bool was_moving = (ramp_done[i] < ramp_total[i] * 0.99f);
       ramp_total[i] = steps;
-      ramp_done[i]  = 0.0f;
+      ramp_done[i]  = was_moving ? (steps * 0.5f) : 0.0f;
     }
     target_pos[i] = tgt;
   }
@@ -342,10 +369,18 @@ void loop() {
     {
       float _prog = (ramp_total[i] > 0.0f) ? (ramp_done[i] / ramp_total[i]) : 0.5f;
       if (_prog > 0.999f) _prog = 0.999f;
-      float _vf = powf(sinf(PI * _prog), RAMP_EXPONENT);
+      float _vf;
+      if (_prog < RAMP_ACCEL_FRAC)
+        _vf = RAMP_MIN_V + (1.0f - RAMP_MIN_V) * (_prog / RAMP_ACCEL_FRAC);
+      else if (_prog > (1.0f - RAMP_DECEL_FRAC))
+        _vf = RAMP_MIN_V + (1.0f - RAMP_MIN_V) * ((1.0f - _prog) / RAMP_DECEL_FRAC);
+      else
+        _vf = 1.0f;
       if (_vf < RAMP_MIN_V) _vf = RAMP_MIN_V;
       float _eff_scale = speed_scale < 0.01f ? 0.01f : speed_scale;
-      unsigned long ramp_interval_us = (unsigned long)(step_interval_us[i] / (_vf * _eff_scale));
+      // dynamic_speed_factor[i]: 1.0 = pacemaker joint (full speed); <1.0 = proportionally slower.
+      float _dyn = dynamic_speed_factor[i] < 0.01f ? 0.01f : dynamic_speed_factor[i];
+      unsigned long ramp_interval_us = (unsigned long)(step_interval_us[i] / (_vf * _eff_scale * _dyn));
       if (now - last_step_time[i] < ramp_interval_us) { dbg_steps_skipped[i]++; continue; }
     }
     float error = target_pos[i] - current_pos[i];
