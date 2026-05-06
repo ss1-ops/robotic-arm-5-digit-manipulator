@@ -14,6 +14,7 @@ Sending a command:
 """
 
 import json
+import math
 import shlex
 import sys
 import threading
@@ -36,11 +37,11 @@ class Joint:
     max_rad: float
 
 JOINTS = [
-    Joint("J1  Waist",       -3.14,  3.14),
-    Joint("J2  Shoulder",    -1.57,  1.57),
-    Joint("J3  Elbow",       -1.57,  1.57),
+    Joint("J1  Waist",       -2.00,  2.40),
+    Joint("J2  Shoulder",    -1.95,  1.95),
+    Joint("J3  Elbow",       -2.20,  2.20),
     Joint("J4  Wrist Roll",  -3.14,  3.14),
-    Joint("J5  Wrist Pitch", -1.57,  1.57),
+    Joint("J5  Wrist Pitch", -1.75,  1.75),
 ]
 
 SLIDER_SCALE   = 100   # slider integer units per radian
@@ -57,8 +58,12 @@ class Worker(QObject):
 
     # Individual startup commands — run sequentially in connect() via _ssh_step()
     _CMD_KILL = (
-        "pkill -f micro_ros_agent 2>/dev/null; "
-        "pkill -f moveo_publisher 2>/dev/null; "
+        # Use process NAME match (no -f) for micro_ros_agent so pkill doesn't
+        # accidentally match and kill the bash shell running this very command.
+        # For moveo_publisher (python3 process), match the .py filename which
+        # won't appear in our bash command's argv.
+        "pkill -9 micro_ros_agent 2>/dev/null; "
+        "pkill -9 -f 'moveo_publisher\\.py' 2>/dev/null; "
         "sleep 1; "
         "rm -f /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_* 2>/dev/null; "
         'echo "[startup] old processes cleared"'
@@ -85,7 +90,11 @@ class Worker(QObject):
         "source /opt/ros/jazzy/setup.bash; "
         "setsid python3 ~/ros_nodes/moveo_publisher.py "
         "  > /tmp/moveo_publisher.log 2>&1 </dev/null & "
-        "sleep 5; "
+        # Poll up to 15 s (1 s intervals) for port 9000 to appear
+        "for i in $(seq 1 15); do "
+        "  ss -tlnp 2>/dev/null | grep -q :9000 && break; "
+        "  sleep 1; "
+        "done; "
         "ss -tlnp 2>/dev/null | grep -q :9000 "
         '  && echo "[startup] moveo_publisher ready on :9000" '
         '  || { echo "[startup] ERROR: publisher failed"; cat /tmp/moveo_publisher.log; }'
@@ -204,7 +213,13 @@ class Worker(QObject):
                     ack_buf += chunk
                 resp = json.loads(ack_buf.strip())
                 if resp.get("ok"):
-                    self.log.emit("[ack] ok")
+                    if "angles" in resp:
+                        degs = ", ".join(f"{math.degrees(a):.1f}°" for a in resp["angles"])
+                        fk_mm = resp.get("fk_err_mm")
+                        suffix = f" (err {fk_mm:.1f}mm)" if fk_mm is not None else ""
+                        self.log.emit(f"[IK] joints: {degs}{suffix}")
+                    else:
+                        self.log.emit("[ack] ok")
                 else:
                     self.log.emit(f"[ack] error: {resp.get('error')}")
             except Exception as e:
@@ -230,6 +245,15 @@ class Worker(QObject):
             return
         payload = json.dumps({"cartesian": [round(v, 4) for v in xyz]}) + "\n"
         self.log.emit(f"[IK] target x={xyz[0]:.3f} y={xyz[1]:.3f} z={xyz[2]:.3f} m")
+        self._send_payload(payload)
+
+    def send_home(self):
+        """Tell ESP32 that its current physical position is home (zero all counters)."""
+        if not self.connected:
+            self.log.emit("[home] SKIP — not connected")
+            return
+        payload = json.dumps({"home": True}) + "\n"
+        self.log.emit("[home] sending set-home command")
         self._send_payload(payload)
 
     # ── SSH exec helper ───────────────────────────────────────────────────────
@@ -380,6 +404,13 @@ class MainWindow(QMainWindow):
         self._btn_home = QPushButton("Go Home (0,0,0,0,0)")
         self._btn_home.clicked.connect(self._go_home)
 
+        self._btn_set_home = QPushButton("📍 Set as Home")
+        self._btn_set_home.setToolTip(
+            "Physically position the arm at its home pose, then click here.\n"
+            "Tells the ESP32 'you are now at zero' — resets internal counters."
+        )
+        self._btn_set_home.clicked.connect(self._set_as_home)
+
         self._btn_estop = QPushButton("⛔  E-STOP")
         self._btn_estop.setStyleSheet(
             "background:#c0392b; color:white; font-weight:bold; padding:6px;"
@@ -388,6 +419,7 @@ class MainWindow(QMainWindow):
 
         action_row.addWidget(self._btn_send_all)
         action_row.addWidget(self._btn_home)
+        action_row.addWidget(self._btn_set_home)
         action_row.addStretch()
         action_row.addWidget(self._btn_estop)
         vlay.addLayout(action_row)
@@ -426,7 +458,8 @@ class MainWindow(QMainWindow):
 
     def _set_controls_enabled(self, enabled: bool):
         for w in self._sliders + self._textboxes + self._set_btns + [
-            self._btn_send_all, self._btn_home, self._speed_slider, self._btn_ik
+            self._btn_send_all, self._btn_home, self._btn_set_home,
+            self._speed_slider, self._btn_ik
         ] + list(self._cart_fields.values()):
             w.setEnabled(enabled)
 
@@ -507,6 +540,28 @@ class MainWindow(QMainWindow):
             self._sliders[i].blockSignals(False)
             self._textboxes[i].setText("0.000")
         self._dispatch([0.0] * 5, force=True)
+
+    def _set_as_home(self):
+        """Declare current physical position as home — zeros ESP32 counters without moving."""
+        from PyQt5.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self,
+            "Set as Home",
+            "This tells the ESP32 that the arm's CURRENT PHYSICAL POSITION is home (all joints = 0).\n\n"
+            "Make sure the arm is already at its desired home pose before confirming.",
+            QMessageBox.Ok | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if reply != QMessageBox.Ok:
+            return
+        # Reset GUI to zero to stay in sync
+        self._angles = [0.0] * 5
+        for i in range(5):
+            self._sliders[i].blockSignals(True)
+            self._sliders[i].setValue(0)
+            self._sliders[i].blockSignals(False)
+            self._textboxes[i].setText("0.000")
+        threading.Thread(target=self._worker.send_home, daemon=True).start()
 
     def _dispatch(self, angles: list, force: bool = False):
         if self._estop or not self._worker.connected:

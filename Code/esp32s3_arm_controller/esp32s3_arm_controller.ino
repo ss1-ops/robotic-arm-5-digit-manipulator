@@ -49,11 +49,21 @@ WebServer server(80);
 #define WRIST_PITCH_DIR_PIN   11
 
 // ================== PER-JOINT STEPPER CONSTANTS ==================
-//                          Waist  Shoulder  Elbow  WristRoll  WristPitch
-const uint8_t MICROSTEPS[5]   = {  4,          16,            16,            16,         8          };
-const float   DEG_PER_STEP[5] = {1.8,         1.8,           1.8,           1.8,        1.8        };
-const float   GEAR_RATIO[5]   = {5.0,         1.0,           5.0,           5.0,        1.0        };
-const float   BELT_RATIO[5]   = {14.45625f,    5.11875f,      4.65304275f,   1.0f,       4.0f       };
+//                             Waist  Shoulder  Elbow  WristRoll  WristPitch
+const uint8_t MICROSTEPS[5]     = {  4,        8,      16,       16,        8   };
+const float   DEG_PER_STEP[5]   = {1.8,      1.8,     1.8,      1.8,       1.8 };
+const float   GEAR_RATIO[5]     = {5.0,      1.0,     5.0,      5.0,       1.0 };
+const float   BELT_RATIO[5]     = {14.45625f, 5.11875f, 4.65304275f, 1.0f, 4.0f};
+// Per-joint direction invert (true = flip HIGH/LOW on DIR pin)
+const bool    DIR_INVERT[5]     = {false,    true,    false,    false,     true};
+// Per-joint speed ceiling as a fraction of MAX_SPEED_RAD_S (1.0 = full speed)
+const float   JOINT_SPEED_FACTOR[5] = {1.0f, 0.5f,   1.0f,     1.0f,      1.0f};
+// Empirical calibration: ratio of (radians commanded) to (radians physically moved).
+// Measured by commanding a known angle and observing actual joint rotation.
+// < 1.0 → arm overshoots (too many steps); > 1.0 → arm undershoots.
+//                                   Waist   Shoulder  Elbow   WristRoll  WristPitch
+//   measurement:              90°→1.15r  90°→1.60r 90°→1.48r 180°→0.81r  90°→1.70r
+const float   CALIB_FACTOR[5] = {1.15f/(PI/2), 1.60f/(PI/2), 1.48f/(PI/2), 0.81f/PI, 1.70f/(PI/2)};
 
 float steps_per_rad[5];
 unsigned long step_interval_us[5];
@@ -79,8 +89,10 @@ float ramp_done[5]  = {0.0f}; // steps issued so far in this segment
 // ================== micro-ROS ==================
 rcl_subscription_t subscriber;
 rcl_subscription_t speed_subscriber;
+rcl_subscription_t home_subscriber;
 sensor_msgs__msg__JointState joint_state_msg;
 std_msgs__msg__Float32       speed_msg;
+std_msgs__msg__Float32       home_msg;
 rclc_executor_t executor;
 rclc_support_t support;
 rcl_allocator_t allocator;
@@ -133,6 +145,18 @@ void joint_state_callback(const void* msgin) {
   }
 }
 
+void home_callback(const void* msgin) {
+  const std_msgs__msg__Float32* msg = (const std_msgs__msg__Float32*)msgin;
+  if (msg->data < 0.5f) return;  // only act on 1.0
+  Serial.println("[HOME] zeroing all joint positions");
+  for (int i = 0; i < 5; i++) {
+    current_pos[i] = 0.0f;
+    target_pos[i]  = 0.0f;
+    ramp_total[i]  = 1.0f;
+    ramp_done[i]   = 0.0f;
+  }
+}
+
 void speed_callback(const void* msgin) {
   const std_msgs__msg__Float32* msg = (const std_msgs__msg__Float32*)msgin;
   float s = msg->data;
@@ -144,6 +168,7 @@ void speed_callback(const void* msgin) {
 
 void uros_cleanup() {
   RCSOFTCHECK(rclc_executor_fini(&executor));
+  RCSOFTCHECK(rcl_subscription_fini(&home_subscriber, &node));
   RCSOFTCHECK(rcl_subscription_fini(&speed_subscriber, &node));
   RCSOFTCHECK(rcl_subscription_fini(&subscriber, &node));
   RCSOFTCHECK(rcl_node_fini(&node));
@@ -184,13 +209,21 @@ void uros_init() {
     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
     "/speed_scale"));
 
-  RCCHECK(rclc_executor_init(&executor, &support.context, 2, &allocator));
+  RCCHECK(rclc_subscription_init_best_effort(
+    &home_subscriber, &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+    "/home_cmd"));
+
+  RCCHECK(rclc_executor_init(&executor, &support.context, 3, &allocator));
   RCCHECK(rclc_executor_add_subscription(
     &executor, &subscriber, &joint_state_msg,
     &joint_state_callback, ON_NEW_DATA));
   RCCHECK(rclc_executor_add_subscription(
     &executor, &speed_subscriber, &speed_msg,
     &speed_callback, ON_NEW_DATA));
+  RCCHECK(rclc_executor_add_subscription(
+    &executor, &home_subscriber, &home_msg,
+    &home_callback, ON_NEW_DATA));
 
   uros_ok = true;
   Serial.printf("[uROS] init OK @ %lu ms\n", millis());
@@ -208,8 +241,8 @@ void setup() {
   pinMode(WRIST_PITCH_STEP_PIN, OUTPUT);pinMode(WRIST_PITCH_DIR_PIN, OUTPUT);
 
   for (int i = 0; i < 5; i++) {
-    steps_per_rad[i]    = (MICROSTEPS[i] * GEAR_RATIO[i] * BELT_RATIO[i] / DEG_PER_STEP[i]) * (180.0f / PI);
-    step_interval_us[i] = (unsigned long)(1e6f / (MAX_SPEED_RAD_S * steps_per_rad[i]));
+    steps_per_rad[i]    = (MICROSTEPS[i] * GEAR_RATIO[i] * BELT_RATIO[i] / DEG_PER_STEP[i]) * (180.0f / PI) * CALIB_FACTOR[i];
+    step_interval_us[i] = (unsigned long)(1e6f / (MAX_SPEED_RAD_S * JOINT_SPEED_FACTOR[i] * steps_per_rad[i]));
   }
 
   // Connect WiFi and configure micro-ROS UDP transport to Pi agent
@@ -282,6 +315,8 @@ void loop() {
     unsigned long now_ms = millis();
     if (now_ms - last_reconnect_ms >= UROS_RECONNECT_MS) {
       last_reconnect_ms = now_ms;
+      // Cleanup any partially-initialized state before retrying
+      uros_cleanup();
       // Re-set transport before each reconnect attempt (UDP requires it after cleanup)
       set_microros_wifi_transports((char*)ssid, (char*)password,
                                    (char*)agent_ip, agent_port);
@@ -334,12 +369,13 @@ void loop() {
         case 4: step_pin = WRIST_PITCH_STEP_PIN; dir_pin = WRIST_PITCH_DIR_PIN; break;
       }
       if (step_pin != -1) {
-        bool dir = steps_needed > 0;
+        bool move_positive = (steps_needed > 0);
+        bool dir = move_positive ^ DIR_INVERT[i];
         digitalWrite(dir_pin, dir ? HIGH : LOW);
         digitalWrite(step_pin, HIGH);
         delayMicroseconds(2);
         digitalWrite(step_pin, LOW);
-        current_pos[i] += (dir ? 1.0f : -1.0f) / steps_per_rad[i];
+        current_pos[i] += (move_positive ? 1.0f : -1.0f) / steps_per_rad[i];
         ramp_done[i]++;
         dbg_steps_issued[i]++;
       }
