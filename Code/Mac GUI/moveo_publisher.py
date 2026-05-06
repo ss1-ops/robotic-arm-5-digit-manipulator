@@ -190,7 +190,13 @@ def solve_ik(xyz: list, current_joints: list = None) -> tuple:
 
 # Joint bounds (radians) — mirror MOVEO_CHAIN link bounds above
 _JOINT_BOUNDS = [(-2.00, 2.40), (-1.95, 1.95), (-2.20, 2.20), (-3.14, 3.14), (-1.75, 1.75)]
-_Z_FLOOR = 0.02   # metres — end-effector must stay above this height
+# Table geometry: 14 cm tall, 13 cm radius.
+# Two-zone floor rule:
+#   r <= TABLE_RADIUS  →  EE must stay above the table top (TABLE_HEIGHT)
+#   r >  TABLE_RADIUS  →  EE may descend to Z_FLOOR_CLEAR (below table surface)
+_TABLE_HEIGHT  = 0.14   # metres — top surface of table
+_TABLE_RADIUS  = 0.14   # metres — radial clearance boundary (table r=0.13 + 1cm margin)
+_Z_FLOOR_CLEAR = -0.10  # metres — floor when outside table footprint
 
 
 def check_collision(joints: list) -> tuple:
@@ -204,13 +210,23 @@ def check_collision(joints: list) -> tuple:
         if j < lo - 1e-3 or j > hi + 1e-3:
             return False, f"J{i+1}={j:.3f} outside limits [{lo:.2f}, {hi:.2f}]"
 
-    # 2. Z-floor: end-effector must not go below table surface
+    # 2. Z-floor: two-zone table collision.
+    #   Inside table footprint (r <= _TABLE_RADIUS): floor is table top height.
+    #   Outside table footprint (r >  _TABLE_RADIUS): floor drops to _Z_FLOOR_CLEAR.
     if _IKPY_AVAILABLE and MOVEO_CHAIN is not None:
+        import math as _math
         full = [0.0] + list(joints) + [0.0]
         fk = MOVEO_CHAIN.forward_kinematics(full)
-        ee_z = fk[2, 3]
-        if ee_z < _Z_FLOOR:
-            return False, f"end-effector Z={ee_z:.3f}m would hit table (min {_Z_FLOOR}m)"
+        ee_x, ee_y, ee_z = fk[0, 3], fk[1, 3], fk[2, 3]
+        ee_r = _math.sqrt(ee_x**2 + ee_y**2)
+        if ee_r <= _TABLE_RADIUS:
+            z_floor = _TABLE_HEIGHT
+            if ee_z < z_floor:
+                return False, f"end-effector Z={ee_z:.3f}m above table footprint (r={ee_r:.3f}m ≤ {_TABLE_RADIUS}m), min Z={z_floor}m"
+        else:
+            z_floor = _Z_FLOOR_CLEAR
+            if ee_z < z_floor:
+                return False, f"end-effector Z={ee_z:.3f}m below floor (r={ee_r:.3f}m > {_TABLE_RADIUS}m), min Z={z_floor}m"
 
     # 3. Elbow fold-back: J2+J3 < -2.8 rad risks forearm hitting base column
     j2, j3 = joints[1], joints[2]
