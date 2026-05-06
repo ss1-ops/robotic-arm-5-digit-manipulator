@@ -108,6 +108,7 @@ rosidl_runtime_c__String js_names[5];
 char     js_name_buf[5][32];
 
 bool uros_ok = false;
+unsigned long last_msg_ms = 0;  // timestamp of last received message (any topic)
 
 // === LOOP TIMING DEBUG GLOBALS ===
 unsigned long dbg_loop_count     = 0;
@@ -120,8 +121,8 @@ unsigned long dbg_last_report_ms   = 0;
 
 // Reconnect attempt interval (ms)
 #define UROS_RECONNECT_MS    3000
-// Ping agent every N ms to detect silent disconnection (UDP has no hard disconnect)
-#define UROS_PING_INTERVAL_MS 2000
+// If no message received for this long, assume agent is gone (ms)
+#define UROS_WATCHDOG_MS     5000
 
 #define RCCHECK(fn)     { if ((fn) != RCL_RET_OK) { uros_ok = false; return; } }
 #define RCSOFTCHECK(fn) { (void)(fn); }
@@ -130,10 +131,9 @@ void joint_state_callback(const void* msgin) {
   const sensor_msgs__msg__JointState* msg =
     (const sensor_msgs__msg__JointState*)msgin;
 
+  last_msg_ms = millis();  // watchdog reset
   size_t n = msg->position.size > 0 ? msg->position.size : msg->position.capacity;
   if (n > 5) n = 5;
-
-  Serial.printf("[CB] %lu ms | %zu joints\n", millis(), n);
 
   // Pass 1: compute the time each joint needs at its own full speed.
   // The joint that takes longest is the "pacemaker" — it runs at full speed;
@@ -153,10 +153,7 @@ void joint_state_callback(const void* msgin) {
   // Pass 2: apply targets, ramp resets, and per-joint speed fractions.
   for (size_t i = 0; i < n; i++) {
     float tgt = (float)msg->position.data[i];
-    float err = tgt - current_pos[i];
     float steps = steps_arr[i];
-    Serial.printf("  j%zu: cur=%.3f tgt=%.3f err=%.3f steps=%.1f\n",
-                  i + 1, current_pos[i], tgt, err, steps);
     // Scale this joint's speed so it arrives at the same time as the slowest joint.
     // dyn = time_i / max_time → step_interval becomes step_interval_i / dyn,
     // so joint i's total time = steps_i * (step_interval_i / dyn) = max_time. ✓
@@ -253,6 +250,7 @@ void uros_init() {
     &home_callback, ON_NEW_DATA));
 
   uros_ok = true;
+  last_msg_ms = millis();  // start watchdog from connection time (not first msg)
   Serial.printf("[uROS] init OK @ %lu ms\n", millis());
 }
 
@@ -278,6 +276,10 @@ void setup() {
   set_microros_wifi_transports((char*)ssid, (char*)password,
                                (char*)agent_ip, agent_port);
 
+  // Disable WiFi modem sleep: ESP32 default DTIM-based sleep wakes every
+  // ~600-700 ms and starves the loop task, causing audible step pulsing.
+  WiFi.setSleep(false);
+
   // ElegantOTA — WiFi already connected above
   if (WiFi.status() == WL_CONNECTED) {
     Serial.printf("[WiFi] connected, IP: %s\n", WiFi.localIP().toString().c_str());
@@ -293,48 +295,42 @@ void setup() {
 }
 
 void loop() {
-  // === STATS DUMP every 1000ms ===
-  dbg_loop_count++;
-  {
-    unsigned long _now = millis();
-    if (_now - dbg_last_report_ms >= 1000) {
-      unsigned long _dt = _now - dbg_last_report_ms;
-      dbg_last_report_ms = _now;
-      Serial.printf("[DBG] loops=%lu dt=%lums | exec=%luus ota=%luus step=%luus\n",
-                    dbg_loop_count, _dt,
-                    dbg_time_executor_us, dbg_time_ota_us, dbg_time_stepper_us);
-      Serial.printf("[DBG] steps j1=%lu j2=%lu j3=%lu j4=%lu j5=%lu\n",
-                    dbg_steps_issued[0], dbg_steps_issued[1], dbg_steps_issued[2],
-                    dbg_steps_issued[3], dbg_steps_issued[4]);
-      Serial.printf("[DBG] skips j1=%lu j2=%lu j3=%lu j4=%lu j5=%lu\n",
-                    dbg_steps_skipped[0], dbg_steps_skipped[1], dbg_steps_skipped[2],
-                    dbg_steps_skipped[3], dbg_steps_skipped[4]);
-      dbg_loop_count = 0;
-      dbg_time_executor_us = dbg_time_ota_us = dbg_time_stepper_us = 0;
-      memset(dbg_steps_issued,  0, sizeof(dbg_steps_issued));
-      memset(dbg_steps_skipped, 0, sizeof(dbg_steps_skipped));
-    }
-  }
+  // === STATS DUMP every 1000ms === (disabled to test step pulsing)
+  // dbg_loop_count++;
+  // {
+  //   unsigned long _now = millis();
+  //   if (_now - dbg_last_report_ms >= 1000) {
+  //     unsigned long _dt = _now - dbg_last_report_ms;
+  //     dbg_last_report_ms = _now;
+  //     Serial.printf("[DBG] loops=%lu dt=%lums | exec=%luus ota=%luus step=%luus\n",
+  //                   dbg_loop_count, _dt,
+  //                   dbg_time_executor_us, dbg_time_ota_us, dbg_time_stepper_us);
+  //     Serial.printf("[DBG] steps j1=%lu j2=%lu j3=%lu j4=%lu j5=%lu\n",
+  //                   dbg_steps_issued[0], dbg_steps_issued[1], dbg_steps_issued[2],
+  //                   dbg_steps_issued[3], dbg_steps_issued[4]);
+  //     Serial.printf("[DBG] skips j1=%lu j2=%lu j3=%lu j4=%lu j5=%lu\n",
+  //                   dbg_steps_skipped[0], dbg_steps_skipped[1], dbg_steps_skipped[2],
+  //                   dbg_steps_skipped[3], dbg_steps_skipped[4]);
+  //     dbg_loop_count = 0;
+  //     dbg_time_executor_us = dbg_time_ota_us = dbg_time_stepper_us = 0;
+  //     memset(dbg_steps_issued,  0, sizeof(dbg_steps_issued));
+  //     memset(dbg_steps_skipped, 0, sizeof(dbg_steps_skipped));
+  //   }
+  // }
 
   // --- micro-ROS: spin executor + ping-based disconnect detection ---
   if (uros_ok) {
-    { unsigned long _t = micros(); rclc_executor_spin_some(&executor, 0); dbg_time_executor_us += micros() - _t; }
+    { unsigned long _t = micros(); rclc_executor_spin_some(&executor, RCL_MS_TO_NS(1)); dbg_time_executor_us += micros() - _t; }
 
-    // Ping agent periodically — catches silent UDP disconnects
-    static unsigned long last_ping_ms = 0;
+    // Passive watchdog — no blocking ping. If no message received for UROS_WATCHDOG_MS,
+    // assume the agent has gone away and schedule a reconnect.
+    // NOTE: do NOT call uros_cleanup() here — the reconnect branch does it once.
+    // Calling cleanup twice (here + reconnect loop) corrupts the transport layer.
     unsigned long now_ms = millis();
-    if (now_ms - last_ping_ms >= UROS_PING_INTERVAL_MS) {
-      last_ping_ms = now_ms;
-      unsigned long ping_start = millis();
-      bool ping_ok = (rmw_uros_ping_agent(200, 1) == RMW_RET_OK);
-      unsigned long ping_dur = millis() - ping_start;
-      Serial.printf("[PING] %s (%lu ms)\n", ping_ok ? "OK" : "FAIL", ping_dur);
-      if (!ping_ok) {
-        // Agent unreachable — cleanup and schedule reconnect
-        uros_cleanup();
-        uros_ok = false;
-        Serial.println("[uROS] disconnected, will reconnect");
-      }
+    if (last_msg_ms > 0 && (now_ms - last_msg_ms) >= UROS_WATCHDOG_MS) {
+      uros_ok = false;
+      last_msg_ms = 0;
+      Serial.println("[uROS] watchdog: no msgs, reconnecting");
     }
   } else {
     // Retry connecting to agent periodically
