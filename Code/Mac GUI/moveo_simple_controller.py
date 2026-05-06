@@ -50,8 +50,9 @@ PUBLISHER_PORT = 9000  # TCP port on the Pi where moveo_publisher.py listens
 
 # ── Worker ─────────────────────────────────────────────────────────────────────
 class Worker(QObject):
-    log    = pyqtSignal(str)
-    status = pyqtSignal(str)  # "connected" | "disconnected" | error text
+    log           = pyqtSignal(str)
+    status        = pyqtSignal(str)   # "connected" | "disconnected" | error text
+    angles_update = pyqtSignal(list)  # emitted after a cartesian IK response with solved angles
 
     HOST = "armpi.local"
     USER = "armpi"
@@ -193,15 +194,15 @@ class Worker(QObject):
         self.log.emit(f"[tx] {pos_str}{spd_str}")
         self._send_payload(payload)
 
-    def _send_payload(self, payload: str):
-        """Send a raw JSON payload and wait for ack. Must be called with channel available."""
+    def _send_payload(self, payload: str) -> dict | None:
+        """Send a raw JSON payload and wait for ack. Returns parsed response dict or None."""
         with self._chan_lock:
             if self._chan is None or self._chan.closed:
                 self.log.emit("[tx] channel closed — reopening…")
                 self._open_channel()
                 if self._chan is None:
                     self.log.emit("[tx] ERROR: could not reopen channel")
-                    return
+                    return None
             try:
                 self._chan.sendall(payload.encode())
                 self._chan.settimeout(2.0)
@@ -222,11 +223,13 @@ class Worker(QObject):
                         self.log.emit("[ack] ok")
                 else:
                     self.log.emit(f"[ack] error: {resp.get('error')}")
+                return resp
             except Exception as e:
                 self.log.emit(f"[tx] ERROR: {e} — will reopen channel on next send")
                 try: self._chan.close()
                 except Exception: pass
                 self._chan = None
+                return None
 
     def send_speed(self, scale: float):
         """Send a speed-only update (no position change)."""
@@ -245,7 +248,11 @@ class Worker(QObject):
             return
         payload = json.dumps({"cartesian": [round(v, 4) for v in xyz]}) + "\n"
         self.log.emit(f"[IK] target x={xyz[0]:.3f} y={xyz[1]:.3f} z={xyz[2]:.3f} m")
-        self._send_payload(payload)
+        resp = self._send_payload(payload)
+        # Sync GUI sliders with the IK solution returned by the Pi so the next
+        # IK call gets the correct current-joint seed (avoids elbow flips).
+        if resp and resp.get("ok") and "angles" in resp:
+            self.angles_update.emit(resp["angles"])
 
     def send_home(self):
         """Tell ESP32 that its current physical position is home (zero all counters)."""
@@ -288,6 +295,7 @@ class MainWindow(QMainWindow):
         self._worker = Worker()
         self._worker.log.connect(self._append_log)
         self._worker.status.connect(self._on_status)
+        self._worker.angles_update.connect(self._on_ik_angles)
 
         self._angles    = [0.0] * 5
         self._speed_pct = 100       # 1–100 %
@@ -442,6 +450,17 @@ class MainWindow(QMainWindow):
         vlay.addWidget(console_box)
 
         self._set_controls_enabled(False)
+
+    def _on_ik_angles(self, angles: list):
+        """Sync sliders and internal state after a successful IK command."""
+        for i, a in enumerate(angles[:5]):
+            self._angles[i] = a
+            self._sliders[i].blockSignals(True)
+            self._sliders[i].setValue(int(a * SLIDER_SCALE))
+            self._sliders[i].blockSignals(False)
+            self._textboxes[i].blockSignals(True)
+            self._textboxes[i].setText(f"{a:.3f}")
+            self._textboxes[i].blockSignals(False)
 
     def _append_log(self, text: str):
         self._console.appendPlainText(text)

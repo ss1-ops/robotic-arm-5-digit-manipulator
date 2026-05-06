@@ -76,10 +76,12 @@ else:
 _MAX_REACH = _L_UPPER + _L_FORE + _L_EE   # 0.464 m
 
 
-def solve_ik(xyz: list) -> tuple:
+def solve_ik(xyz: list, current_joints: list = None) -> tuple:
     """Return ([j1..j5], fk_err_mm) for Cartesian target xyz (metres).
 
-    Uses analytical 2R warm starts + multi-restart to avoid local minima.
+    When current_joints ([j1..j5] radians) is provided, biases the solution
+    toward the current configuration so the arm never flips elbow-up/down
+    unexpectedly during continuous motion.
     Raises ValueError if the target is outside the arm's workspace.
     """
     import math as _math
@@ -113,6 +115,11 @@ def solve_ik(xyz: list) -> tuple:
     gamma  = _math.atan2(r_h, dz_sh)  # angle of target from vertical (+Z)
 
     warm_starts = []
+    # Seed with current joint state first — this is the continuity bias.
+    # ikpy will find the nearest valid solution in the same configuration
+    # (elbow-up/down) as the arm is currently in.
+    if current_joints is not None and len(current_joints) == 5:
+        warm_starts.append([0.0] + list(current_joints) + [0.0])
     for sign in [1, -1]:   # elbow-forward and elbow-backward
         sj3 = sign * sin_j3_abs
         j3  = _math.atan2(sj3, cos_j3)
@@ -122,7 +129,11 @@ def solve_ik(xyz: list) -> tuple:
         warm_starts.append([0.0, j1_guess, j2, j3, 0.0, 0.0, 0.0])
     warm_starts.append([0.0, j1_guess, 0.0, 0.0, 0.0, 0.0, 0.0])  # fallback
 
-    best_result, best_err, best_fk = None, float('inf'), (x, y, z)
+    # Collect all candidates, filtering out solutions with large FK error.
+    # Then choose by joint-space continuity when current_joints is known,
+    # otherwise by FK accuracy alone.
+    _FK_THRESHOLD_M = 0.050  # 50 mm — reject clearly diverged solutions
+    candidates = []          # list of (fk_err_m, j_dist, result, fk_xyz)
     for warm in warm_starts:
         try:
             result = MOVEO_CHAIN.inverse_kinematics(target_position=xyz, initial_position=warm)
@@ -130,9 +141,35 @@ def solve_ik(xyz: list) -> tuple:
             continue
         fk  = MOVEO_CHAIN.forward_kinematics(result)
         ex, ey, ez = fk[0, 3], fk[1, 3], fk[2, 3]
-        err = _math.sqrt((ex-x)**2 + (ey-y)**2 + (ez-z)**2)
-        if err < best_err:
-            best_err, best_result, best_fk = err, result, (ex, ey, ez)
+        fk_err = _math.sqrt((ex-x)**2 + (ey-y)**2 + (ez-z)**2)
+        if fk_err > _FK_THRESHOLD_M:
+            continue
+        j_dist = 0.0
+        if current_joints is not None:
+            j_dist = _math.sqrt(sum((result[k+1] - current_joints[k])**2 for k in range(5)))
+        candidates.append((fk_err, j_dist, result, (ex, ey, ez)))
+
+    if not candidates:
+        # Fallback: no solution within threshold — return best FK error regardless
+        best_result, best_err, best_fk = None, float('inf'), (x, y, z)
+        for warm in warm_starts:
+            try:
+                result = MOVEO_CHAIN.inverse_kinematics(target_position=xyz, initial_position=warm)
+            except Exception:
+                continue
+            fk  = MOVEO_CHAIN.forward_kinematics(result)
+            ex, ey, ez = fk[0, 3], fk[1, 3], fk[2, 3]
+            err = _math.sqrt((ex-x)**2 + (ey-y)**2 + (ez-z)**2)
+            if err < best_err:
+                best_err, best_result, best_fk = err, result, (ex, ey, ez)
+    else:
+        # Sort: when current_joints known, prefer joint-space continuity to
+        # avoid elbow-up/down flips. Break ties with FK accuracy.
+        if current_joints is not None:
+            candidates.sort(key=lambda c: (c[1], c[0]))
+        else:
+            candidates.sort(key=lambda c: c[0])
+        best_err, _, best_result, best_fk = candidates[0]
 
     # For targets on the Z axis (x≈0, y≈0), J1 is degenerate — force to 0
     if abs(x) < 0.01 and abs(y) < 0.01:
@@ -151,6 +188,43 @@ def solve_ik(xyz: list) -> tuple:
     return list(best_result[1:6]), fk_err_mm   # drop OriginLink [0] and ee [6]
 
 
+# Joint bounds (radians) — mirror MOVEO_CHAIN link bounds above
+_JOINT_BOUNDS = [(-2.00, 2.40), (-1.95, 1.95), (-2.20, 2.20), (-3.14, 3.14), (-1.75, 1.75)]
+_Z_FLOOR = 0.02   # metres — end-effector must stay above this height
+
+
+def check_collision(joints: list) -> tuple:
+    """Return (ok: bool, reason: str). Checks joint limits and Moveo-specific
+    self-collision heuristics. reason is empty string when ok=True."""
+    import math as _math
+
+    # 1. Hard joint limit check
+    for i, (lo, hi) in enumerate(_JOINT_BOUNDS):
+        j = joints[i]
+        if j < lo - 1e-3 or j > hi + 1e-3:
+            return False, f"J{i+1}={j:.3f} outside limits [{lo:.2f}, {hi:.2f}]"
+
+    # 2. Z-floor: end-effector must not go below table surface
+    if _IKPY_AVAILABLE and MOVEO_CHAIN is not None:
+        full = [0.0] + list(joints) + [0.0]
+        fk = MOVEO_CHAIN.forward_kinematics(full)
+        ee_z = fk[2, 3]
+        if ee_z < _Z_FLOOR:
+            return False, f"end-effector Z={ee_z:.3f}m would hit table (min {_Z_FLOOR}m)"
+
+    # 3. Elbow fold-back: J2+J3 < -2.8 rad risks forearm hitting base column
+    j2, j3 = joints[1], joints[2]
+    if j2 + j3 < -2.8:
+        return False, f"elbow fold-back risk: J2+J3={j2+j3:.2f} (limit -2.8 rad)"
+
+    # 4. Wrist-to-forearm: extreme J5 combined with extreme J3
+    j5 = joints[4]
+    if abs(j5) > 1.4 and abs(j3) > 1.8:
+        return False, f"wrist/forearm collision risk: |J5|={abs(j5):.2f} with |J3|={abs(j3):.2f}"
+
+    return True, ""
+
+
 class JointPublisherNode(Node):
     def __init__(self):
         super().__init__("moveo_publisher")
@@ -165,6 +239,10 @@ class JointPublisherNode(Node):
         self._speed_pub = self.create_publisher(Float32, "/speed_scale", qos)
         self._home_pub  = self.create_publisher(Float32, "/home_cmd", qos)
         self.get_logger().info("moveo_publisher ready, advertising /joint_commands + /speed_scale + /home_cmd")
+        # Last successfully commanded angles — used to seed IK for continuity.
+        # Protected by _joints_lock for thread safety.
+        self._last_joints = [0.0] * 5
+        self._joints_lock = threading.Lock()
 
     def publish(self, angles: list):
         msg = JointState()
@@ -172,6 +250,8 @@ class JointPublisherNode(Node):
         msg.name     = JOINT_NAMES
         msg.position = [float(a) for a in angles]
         self._pub.publish(msg)
+        with self._joints_lock:
+            self._last_joints = list(msg.position)
         self.get_logger().info(f"published {[f'{a:.3f}' for a in angles]}")
 
     def publish_home(self):
@@ -236,16 +316,52 @@ def serve(node: JointPublisherNode):
                             conn.sendall(b'{"ok":true}\n')
                         # Cartesian IK command: {"cartesian": [x, y, z]}  (metres)
                         elif "cartesian" in data:
-                            angles, fk_err_mm = solve_ik(data["cartesian"])
+                            with node._joints_lock:
+                                curr = list(node._last_joints)
+                            angles, fk_err_mm = solve_ik(data["cartesian"], curr)
+                            ok, reason = check_collision(angles)
+                            if not ok:
+                                raise ValueError(f"collision/limit: {reason}")
                             with _publish_lock:
                                 node.publish(angles)
                             ack = json.dumps({"ok": True, "angles": [round(a, 4) for a in angles], "fk_err_mm": round(fk_err_mm, 1)}) + "\n"
+                            conn.sendall(ack.encode())
+                        # Trajectory command: {"trajectory": [[x,y,z], ...], "dt": 0.2}
+                        # Solves IK for each waypoint sequentially — each solution seeds
+                        # the next — then publishes at dt-second intervals for smooth
+                        # continuous motion without stopping between waypoints.
+                        elif "trajectory" in data:
+                            waypoints = data["trajectory"]
+                            dt = float(data.get("dt", 0.2))
+                            dt = max(0.05, min(5.0, dt))  # clamp 50 ms – 5 s
+                            if not isinstance(waypoints, list) or len(waypoints) == 0:
+                                raise ValueError("trajectory must be a non-empty list of [x,y,z] points")
+                            with node._joints_lock:
+                                curr = list(node._last_joints)
+                            results = []
+                            for i, wp in enumerate(waypoints):
+                                angles, fk_err = solve_ik(wp, curr)
+                                ok, reason = check_collision(angles)
+                                if not ok:
+                                    raise ValueError(f"waypoint {i}: {reason}")
+                                with _publish_lock:
+                                    node.publish(angles)
+                                curr = angles   # seed next waypoint from this solution
+                                results.append({"angles": [round(a, 4) for a in angles],
+                                                "fk_err_mm": round(fk_err, 1)})
+                                if i < len(waypoints) - 1:
+                                    time.sleep(dt)
+                            ack = json.dumps({"ok": True, "waypoints": len(waypoints),
+                                              "results": results}) + "\n"
                             conn.sendall(ack.encode())
                         # Direct joint-angle command
                         elif "position" in data:
                             angles = data["position"]
                             if len(angles) != 5:
                                 raise ValueError(f"expected 5 positions, got {len(angles)}")
+                            ok, reason = check_collision(angles)
+                            if not ok:
+                                raise ValueError(f"collision/limit: {reason}")
                             with _publish_lock:
                                 node.publish(angles)
                             conn.sendall(b'{"ok":true}\n')
