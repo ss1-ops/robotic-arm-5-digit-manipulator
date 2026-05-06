@@ -194,7 +194,7 @@ _JOINT_BOUNDS = [(-2.00, 2.40), (-1.95, 1.95), (-2.20, 2.20), (-3.14, 3.14), (-1
 # Two-zone floor rule:
 #   r <= TABLE_RADIUS  →  EE must stay above the table top (TABLE_HEIGHT)
 #   r >  TABLE_RADIUS  →  EE may descend to Z_FLOOR_CLEAR (below table surface)
-_TABLE_HEIGHT  = 0.14   # metres — top surface of table
+_TABLE_HEIGHT  = 0.02   # metres — minimum Z over table footprint
 _TABLE_RADIUS  = 0.14   # metres — radial clearance boundary (table r=0.13 + 1cm margin)
 _Z_FLOOR_CLEAR = -0.10  # metres — floor when outside table footprint
 
