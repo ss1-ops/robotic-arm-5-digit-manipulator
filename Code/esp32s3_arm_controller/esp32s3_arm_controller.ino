@@ -89,9 +89,11 @@ float dynamic_speed_factor[5] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
 rcl_subscription_t subscriber;
 rcl_subscription_t speed_subscriber;
 rcl_subscription_t home_subscriber;
+rcl_subscription_t reboot_subscriber;
 sensor_msgs__msg__JointState joint_state_msg;
 std_msgs__msg__Float32       speed_msg;
 std_msgs__msg__Float32       home_msg;
+std_msgs__msg__Float32       reboot_msg;
 rclc_executor_t executor;
 rclc_support_t support;
 rcl_allocator_t allocator;
@@ -170,8 +172,21 @@ void speed_callback(const void* msgin) {
   speed_scale = s;
 }
 
+// Remote reboot. Publish data >= 0.5 to /reboot to trigger ESP.restart().
+// Useful when the chip wedges and the reset button is hard to reach — the
+// Pi can do it via:  ros2 topic pub --once /reboot std_msgs/msg/Float32 "{data: 1.0}"
+// A short delay before restart lets micro-ROS ACK the message so the
+// publisher doesn't see a transport error.
+void reboot_callback(const void* msgin) {
+  const std_msgs__msg__Float32* msg = (const std_msgs__msg__Float32*)msgin;
+  if (msg->data < 0.5f) return;
+  delay(100);
+  ESP.restart();
+}
+
 void uros_cleanup() {
   RCSOFTCHECK(rclc_executor_fini(&executor));
+  RCSOFTCHECK(rcl_subscription_fini(&reboot_subscriber, &node));
   RCSOFTCHECK(rcl_subscription_fini(&home_subscriber, &node));
   RCSOFTCHECK(rcl_subscription_fini(&speed_subscriber, &node));
   RCSOFTCHECK(rcl_subscription_fini(&subscriber, &node));
@@ -217,7 +232,12 @@ void uros_init() {
     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
     "/home_cmd"));
 
-  RCCHECK(rclc_executor_init(&executor, &support.context, 3, &allocator));
+  RCCHECK(rclc_subscription_init_best_effort(
+    &reboot_subscriber, &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+    "/reboot"));
+
+  RCCHECK(rclc_executor_init(&executor, &support.context, 4, &allocator));
   RCCHECK(rclc_executor_add_subscription(
     &executor, &subscriber, &joint_state_msg,
     &joint_state_callback, ON_NEW_DATA));
@@ -227,6 +247,9 @@ void uros_init() {
   RCCHECK(rclc_executor_add_subscription(
     &executor, &home_subscriber, &home_msg,
     &home_callback, ON_NEW_DATA));
+  RCCHECK(rclc_executor_add_subscription(
+    &executor, &reboot_subscriber, &reboot_msg,
+    &reboot_callback, ON_NEW_DATA));
 
   uros_ok = true;
 }
