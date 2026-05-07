@@ -70,13 +70,22 @@ class Worker(QObject):
         'echo "[startup] old processes cleared"'
     )
     _CMD_AGENT = (
+        # USB CDC serial transport — firmware uses set_microros_transports()
+        # which binds to Serial. Pi side runs the agent against /dev/ttyACM0.
+        # If /dev/ttyACM0 is missing the ESP32 either isn't plugged in or
+        # hasn't enumerated yet — wait briefly for it.
         "export FASTDDS_BUILTIN_TRANSPORTS=UDPv4; "
         "source ~/microros_ws/install/setup.bash; "
-        "setsid ros2 run micro_ros_agent micro_ros_agent udp4 --port 8888 -v4 "
+        "for i in 1 2 3 4 5; do [ -e /dev/ttyACM0 ] && break; sleep 1; done; "
+        "if [ ! -e /dev/ttyACM0 ]; then "
+        '  echo "[startup] ERROR: /dev/ttyACM0 not present (ESP32 unplugged?)"; '
+        "  exit 1; "
+        "fi; "
+        "setsid ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyACM0 -b 115200 -v4 "
         "  > /tmp/mra.log 2>&1 </dev/null & "
         "sleep 3; "
         "pgrep -c micro_ros_agent > /dev/null "
-        '  && echo "[startup] micro_ros_agent running" '
+        '  && echo "[startup] micro_ros_agent running (serial:/dev/ttyACM0)" '
         '  || { echo "[startup] ERROR: agent not found"; cat /tmp/mra.log; }'
     )
     _CMD_ESP32 = (

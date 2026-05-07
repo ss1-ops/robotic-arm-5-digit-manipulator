@@ -3,13 +3,21 @@
 // sending a single serial byte to the micro-ROS agent.
 uint32_t loopTaskStackSize = 16384;
 
-// ESP32-S3 micro-ROS Joint State Subscriber + ElegantOTA
+// ESP32-S3 micro-ROS Joint State Subscriber — USB CDC transport.
 //
-// micro-ROS subscribes to /joint_commands over WiFi UDP.
-// ElegantOTA also runs over WiFi on the same connection.
+// micro-ROS uses Serial (= USB CDC, when compiled with CDCOnBoot=cdc) as its
+// XRCE-DDS transport. The Pi runs the agent against /dev/ttyACM0:
 //
-// Pi-side agent:
-//   ros2 run micro_ros_agent micro_ros_agent udp4 --port 8888
+//   ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyACM0 -b 115200
+//
+// IMPORTANT: while the agent is running it owns /dev/ttyACM0 — kill it before
+// flashing or arduino-cli upload will fail. After flashing, restart the agent.
+//
+// IMPORTANT: do NOT call Serial.print* anywhere — Serial is the transport,
+// debug bytes would corrupt the protocol stream. All previous Serial debug
+// output has been removed for this reason.
+//
+// Compile with FQBN: esp32:esp32:esp32s3:CDCOnBoot=cdc
 //
 // Arduino library required: micro_ros_arduino
 //   https://github.com/micro-ROS/micro_ros_arduino/releases
@@ -22,19 +30,6 @@ uint32_t loopTaskStackSize = 16384;
 #include <rclc/executor.h>
 #include <sensor_msgs/msg/joint_state.h>
 #include <std_msgs/msg/float32.h>
-
-#include <WiFi.h>
-#include <WebServer.h>
-#include <ESPmDNS.h>
-#include <ElegantOTA.h>
-
-// --- WiFi credentials ---
-const char* ssid        = "WAVLINK-N";
-const char* password    = "Jk12345678";
-const char* agent_ip    = "192.168.1.142";  // Pi IP
-const uint16_t agent_port = 8888;
-
-WebServer server(80);
 
 // --- Stepper pins ---
 #define WAIST_STEP_PIN        4
@@ -75,13 +70,14 @@ float current_pos[5] = {0.0};
 float target_pos[5]  = {0.0};
 unsigned long last_step_time[5] = {0};
 
-// ================== Trapezoidal ramp state ==================
-// Velocity profile: linear ramp-up for ACCEL_FRAC, full speed for middle, linear ramp-down for DECEL_FRAC.
-// RAMP_MIN_V is the velocity fraction at the very start/end of the move (never drops to zero).
+// ================== Sinusoidal ramp state ==================
+// Each move's velocity follows v(s) = v_max * sin(π * s/S),
+// giving smooth acceleration from rest and deceleration to rest.
+// RAMP_MIN_V clamps the start/end fraction to avoid infinite intervals.
 #define RAMP_MIN_V       0.25f  // minimum velocity fraction at start/end of move
-#define RAMP_ACCEL_FRAC  0.075f // fraction of steps spent accelerating (linear ramp-up)
-#define RAMP_DECEL_FRAC  0.075f // fraction of steps spent decelerating (linear ramp-down)
-// 85% of steps run at full speed between the ramps.
+#define RAMP_ACCEL_FRAC  0.15f  // fraction of steps spent accelerating
+#define RAMP_DECEL_FRAC  0.15f  // fraction of steps spent decelerating
+// Velocity profile: linear ramp-up for ACCEL_FRAC, full speed for middle, linear ramp-down for DECEL_FRAC.
 float ramp_total[5] = {1.0f}; // total steps in current move segment
 float ramp_done[5]  = {0.0f}; // steps issued so far in this segment
 // Per-move speed fraction for each joint (0.0–1.0).
@@ -108,25 +104,12 @@ char     js_name_buf[5][32];
 
 bool uros_ok = false;
 
-// True whenever any joint has at least one step pending. The loop() recomputes
-// this every iteration. Code paths that would BLOCK the stepper for-loop —
-// the 200 ms ping, the 1 s stats printfs, the per-callback printfs, the
-// START/STOP printfs — check this flag and skip themselves while it's set,
-// so motion never stalls. They resume the moment motion ends.
-volatile bool g_stepping_active = false;
-
-// === LOOP TIMING DEBUG GLOBALS ===
-unsigned long dbg_loop_count     = 0;
-unsigned long dbg_time_executor_us = 0;  // time in rclc_executor_spin_some
-unsigned long dbg_time_ota_us      = 0;  // time in server.handleClient + ElegantOTA
-unsigned long dbg_time_stepper_us  = 0;  // time in stepper for-loop
-unsigned long dbg_steps_issued[5]  = {0};
-unsigned long dbg_steps_skipped[5] = {0};  // interval not yet elapsed
-unsigned long dbg_last_report_ms   = 0;
-
 // Reconnect attempt interval (ms)
 #define UROS_RECONNECT_MS    3000
-// Ping agent every N ms to detect silent disconnection (UDP has no hard disconnect)
+// Ping agent every N ms to detect silent disconnection.
+// Serial transport is much more reliable than UDP — disconnects show up
+// immediately as transport read errors — but a periodic ping costs nothing
+// and gives us a definitive heartbeat.
 #define UROS_PING_INTERVAL_MS 2000
 
 #define RCCHECK(fn)     { if ((fn) != RCL_RET_OK) { uros_ok = false; return; } }
@@ -139,13 +122,9 @@ void joint_state_callback(const void* msgin) {
   size_t n = msg->position.size > 0 ? msg->position.size : msg->position.capacity;
   if (n > 5) n = 5;
 
-  if (!g_stepping_active) Serial.printf("[CB] %lu ms | %zu joints\n", millis(), n);
-
-  // Pass 1: compute the time each joint needs at its own full speed.
-  // The joint that takes longest is the "pacemaker" — it runs at full speed;
-  // all others are slowed proportionally so everyone finishes simultaneously.
-  // Using time (steps × step_interval_us) instead of raw step count correctly
-  // accounts for joints that have different maximum speeds (JOINT_SPEED_FACTOR).
+  // Pass 1: compute per-joint step counts and time-to-finish at each joint's
+  // own full speed. The slowest joint becomes the "pacemaker" — it runs at
+  // full speed and all others are scaled down so everyone finishes together.
   float steps_arr[5] = {0};
   float time_arr[5]  = {0};
   float max_time = 1.0f;
@@ -159,13 +138,7 @@ void joint_state_callback(const void* msgin) {
   // Pass 2: apply targets, ramp resets, and per-joint speed fractions.
   for (size_t i = 0; i < n; i++) {
     float tgt = (float)msg->position.data[i];
-    float err = tgt - current_pos[i];
     float steps = steps_arr[i];
-    if (!g_stepping_active) Serial.printf("  j%zu: cur=%.3f tgt=%.3f err=%.3f steps=%.1f\n",
-                  i + 1, current_pos[i], tgt, err, steps);
-    // Scale this joint's speed so it arrives at the same time as the slowest joint.
-    // dyn = time_i / max_time → step_interval becomes step_interval_i / dyn,
-    // so joint i's total time = steps_i * (step_interval_i / dyn) = max_time. ✓
     dynamic_speed_factor[i] = (steps >= 1.0f) ? (time_arr[i] / max_time) : 1.0f;
 
     // Ramp reset: if mid-move, skip re-acceleration by starting at peak velocity.
@@ -181,7 +154,6 @@ void joint_state_callback(const void* msgin) {
 void home_callback(const void* msgin) {
   const std_msgs__msg__Float32* msg = (const std_msgs__msg__Float32*)msgin;
   if (msg->data < 0.5f) return;  // only act on 1.0
-  Serial.println("[HOME] zeroing all joint positions");
   for (int i = 0; i < 5; i++) {
     current_pos[i] = 0.0f;
     target_pos[i]  = 0.0f;
@@ -196,7 +168,6 @@ void speed_callback(const void* msgin) {
   if (s < 0.0f) s = 0.0f;
   if (s > 1.0f) s = 1.0f;
   speed_scale = s;
-  Serial.printf("[SPEED] scale=%.2f\n", speed_scale);
 }
 
 void uros_cleanup() {
@@ -209,7 +180,6 @@ void uros_cleanup() {
 }
 
 void uros_init() {
-  Serial.printf("[uROS] init start @ %lu ms\n", millis());
   allocator = rcl_get_default_allocator();
   RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
   RCCHECK(rclc_node_init_default(&node, "moveo_esp32", "", &support));
@@ -259,13 +229,9 @@ void uros_init() {
     &home_callback, ON_NEW_DATA));
 
   uros_ok = true;
-  Serial.printf("[uROS] init OK @ %lu ms\n", millis());
 }
 
 void setup() {
-  // Serial for debug output (not used for micro-ROS transport)
-  Serial.begin(115200);
-
   // Stepper pins
   pinMode(WAIST_STEP_PIN, OUTPUT);      pinMode(WAIST_DIR_PIN, OUTPUT);
   pinMode(SHOULDER_STEP_PIN, OUTPUT);   pinMode(SHOULDER_DIR_PIN, OUTPUT);
@@ -278,30 +244,20 @@ void setup() {
     step_interval_us[i] = (unsigned long)(1e6f / (MAX_SPEED_RAD_S * JOINT_SPEED_FACTOR[i] * steps_per_rad[i]));
   }
 
-  // Connect WiFi and configure micro-ROS UDP transport to Pi agent
-  // set_microros_wifi_transports blocks until WiFi is connected
-  Serial.printf("[WiFi] connecting to %s...\n", ssid);
-  set_microros_wifi_transports((char*)ssid, (char*)password,
-                               (char*)agent_ip, agent_port);
+  // micro-ROS over USB CDC. set_microros_transports() binds Serial as the
+  // XRCE-DDS transport and calls Serial.begin(115200) internally. Anything
+  // else writing to Serial after this point will corrupt the protocol stream.
+  set_microros_transports();
 
-  // ElegantOTA — WiFi already connected above
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("[WiFi] connected, IP: %s\n", WiFi.localIP().toString().c_str());
-    MDNS.begin("ArmESP");
-    ElegantOTA.begin(&server);
-    server.begin();
-  } else {
-    Serial.println("[WiFi] NOT connected!");
-  }
-
+  // Give the host (Pi-side micro-ROS agent) time to enumerate and open
+  // /dev/ttyACM0 before we try to negotiate a session.
   delay(2000);
   uros_init();
 }
 
 void loop() {
-  // === Compute stepping_active up-front ===
-  // True if any joint still has at least one step pending. Drives the gates
-  // around ping / stats / per-callback printfs so they never interrupt motion.
+  // Recompute "is any joint mid-move?" up front. Used to gate the periodic
+  // ping so it never blocks the stepper for-loop.
   bool stepping_active = false;
   for (int i = 0; i < 5; i++) {
     if (fabsf((target_pos[i] - current_pos[i]) * steps_per_rad[i]) >= 1.0f) {
@@ -309,55 +265,19 @@ void loop() {
       break;
     }
   }
-  g_stepping_active = stepping_active;
-
-  // === STATS DUMP every 1000ms (skipped while stepping to avoid stutter) ===
-  dbg_loop_count++;
-  {
-    unsigned long _now = millis();
-    if (!stepping_active && _now - dbg_last_report_ms >= 1000) {
-      unsigned long _dt = _now - dbg_last_report_ms;
-      dbg_last_report_ms = _now;
-      Serial.printf("[DBG] loops=%lu dt=%lums | exec=%luus ota=%luus step=%luus\n",
-                    dbg_loop_count, _dt,
-                    dbg_time_executor_us, dbg_time_ota_us, dbg_time_stepper_us);
-      Serial.printf("[DBG] steps j1=%lu j2=%lu j3=%lu j4=%lu j5=%lu\n",
-                    dbg_steps_issued[0], dbg_steps_issued[1], dbg_steps_issued[2],
-                    dbg_steps_issued[3], dbg_steps_issued[4]);
-      Serial.printf("[DBG] skips j1=%lu j2=%lu j3=%lu j4=%lu j5=%lu\n",
-                    dbg_steps_skipped[0], dbg_steps_skipped[1], dbg_steps_skipped[2],
-                    dbg_steps_skipped[3], dbg_steps_skipped[4]);
-      dbg_loop_count = 0;
-      dbg_time_executor_us = dbg_time_ota_us = dbg_time_stepper_us = 0;
-      memset(dbg_steps_issued,  0, sizeof(dbg_steps_issued));
-      memset(dbg_steps_skipped, 0, sizeof(dbg_steps_skipped));
-    }
-  }
 
   // --- micro-ROS: spin executor + ping-based disconnect detection ---
   if (uros_ok) {
-    { unsigned long _t = micros(); rclc_executor_spin_some(&executor, 0); dbg_time_executor_us += micros() - _t; }
+    rclc_executor_spin_some(&executor, 0);
 
-    // Ping agent periodically — catches silent UDP disconnects.
-    // SKIPPED while a move is in progress: rmw_uros_ping_agent blocks for up
-    // to 200 ms, which would stall the stepper for-loop and produce the
-    // strong every-2-second stutter Sam was hearing. Once motion ends, the
-    // next loop iteration sees stepping_active=false and the ping fires
-    // immediately (last_ping_ms hasn't moved during the gated window), so
-    // disconnect detection only lags behind by the duration of the move.
+    // Ping is gated while moving — see WiFi version commit history for why.
     static unsigned long last_ping_ms = 0;
     unsigned long now_ms = millis();
     if (!stepping_active && now_ms - last_ping_ms >= UROS_PING_INTERVAL_MS) {
       last_ping_ms = now_ms;
-      unsigned long ping_start = millis();
-      bool ping_ok = (rmw_uros_ping_agent(200, 1) == RMW_RET_OK);
-      unsigned long ping_dur = millis() - ping_start;
-      Serial.printf("[PING] %s (%lu ms)\n", ping_ok ? "OK" : "FAIL", ping_dur);
-      if (!ping_ok) {
-        // Agent unreachable — cleanup and schedule reconnect
+      if (rmw_uros_ping_agent(200, 1) != RMW_RET_OK) {
         uros_cleanup();
         uros_ok = false;
-        Serial.println("[uROS] disconnected, will reconnect");
       }
     }
   } else {
@@ -366,30 +286,16 @@ void loop() {
     unsigned long now_ms = millis();
     if (now_ms - last_reconnect_ms >= UROS_RECONNECT_MS) {
       last_reconnect_ms = now_ms;
-      // Cleanup any partially-initialized state before retrying
       uros_cleanup();
-      // Re-set transport before each reconnect attempt (UDP requires it after cleanup)
-      set_microros_wifi_transports((char*)ssid, (char*)password,
-                                   (char*)agent_ip, agent_port);
+      // Serial transport: nothing to re-bind, just retry the session.
       uros_init();
     }
   }
 
-  // --- ElegantOTA: rate-limited to every 10ms ---
-  static unsigned long last_wifi_ms = 0;
-  {
-    unsigned long now_ms = millis();
-    if (now_ms - last_wifi_ms >= 10) {
-      { unsigned long _t = micros(); server.handleClient(); ElegantOTA.loop(); dbg_time_ota_us += micros() - _t; }
-      last_wifi_ms = now_ms;
-    }
-  }
-
   // --- Stepper loop ---
-  { unsigned long _st = micros();
   for (int i = 0; i < 5; i++) {
     unsigned long now = micros();
-    // Sinusoidal ramp: slow at start, peak in middle, slow at end
+    // Sinusoidal-ish ramp (linear up, flat, linear down).
     {
       float _prog = (ramp_total[i] > 0.0f) ? (ramp_done[i] / ramp_total[i]) : 0.5f;
       if (_prog > 0.999f) _prog = 0.999f;
@@ -402,28 +308,12 @@ void loop() {
         _vf = 1.0f;
       if (_vf < RAMP_MIN_V) _vf = RAMP_MIN_V;
       float _eff_scale = speed_scale < 0.01f ? 0.01f : speed_scale;
-      // dynamic_speed_factor[i]: 1.0 = pacemaker joint (full speed); <1.0 = proportionally slower.
       float _dyn = dynamic_speed_factor[i] < 0.01f ? 0.01f : dynamic_speed_factor[i];
       unsigned long ramp_interval_us = (unsigned long)(step_interval_us[i] / (_vf * _eff_scale * _dyn));
-      if (now - last_step_time[i] < ramp_interval_us) { dbg_steps_skipped[i]++; continue; }
+      if (now - last_step_time[i] < ramp_interval_us) continue;
     }
     float error = target_pos[i] - current_pos[i];
     float steps_needed = error * steps_per_rad[i];
-    static bool was_moving[5] = {false};
-    bool moving = fabs(steps_needed) >= 1.0f;
-    if (moving != was_moving[i]) {
-      // Trapezoidal ramp: linear accel for 7.5%, full speed for 85%, linear decel for 7.5%
-      // printf to USB CDC takes ~1 ms, which would stall the stepper loop.
-      // The was_moving[] state still updates so the next idle iteration
-      // can emit the transition cleanly.
-      if (!stepping_active) {
-        Serial.printf("[STEP] j%d %s | cur=%.3f tgt=%.3f steps=%.1f prog=%.2f\n",
-                      i+1, moving ? "START" : "STOP ",
-                      current_pos[i], target_pos[i], steps_needed,
-                      ramp_done[i] / max(ramp_total[i], 1.0f));
-      }
-      was_moving[i] = moving;
-    }
     if (fabs(steps_needed) >= 1.0f) {
       int step_pin = -1, dir_pin = -1;
       switch (i) {
@@ -442,10 +332,8 @@ void loop() {
         digitalWrite(step_pin, LOW);
         current_pos[i] += (move_positive ? 1.0f : -1.0f) / steps_per_rad[i];
         ramp_done[i]++;
-        dbg_steps_issued[i]++;
       }
       last_step_time[i] = now;
     }
   }
-  dbg_time_stepper_us += micros() - _st; }
 }
