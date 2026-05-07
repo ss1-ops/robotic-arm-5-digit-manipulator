@@ -121,8 +121,9 @@ unsigned long dbg_last_report_ms   = 0;
 
 // Reconnect attempt interval (ms)
 #define UROS_RECONNECT_MS    3000
-// If no message received for this long, assume agent is gone (ms)
-#define UROS_WATCHDOG_MS     5000
+// Watchdog: if no message arrives for this long, force a reconnect.
+// 60s gives a wide margin before the XRCE-DDS agent (~64s) times out the session.
+#define UROS_WATCHDOG_MS    60000
 
 #define RCCHECK(fn)     { if ((fn) != RCL_RET_OK) { uros_ok = false; return; } }
 #define RCSOFTCHECK(fn) { (void)(fn); }
@@ -171,6 +172,7 @@ void joint_state_callback(const void* msgin) {
 
 void home_callback(const void* msgin) {
   const std_msgs__msg__Float32* msg = (const std_msgs__msg__Float32*)msgin;
+  last_msg_ms = millis();
   if (msg->data < 0.5f) return;  // only act on 1.0
   Serial.println("[HOME] zeroing all joint positions");
   for (int i = 0; i < 5; i++) {
@@ -183,6 +185,7 @@ void home_callback(const void* msgin) {
 
 void speed_callback(const void* msgin) {
   const std_msgs__msg__Float32* msg = (const std_msgs__msg__Float32*)msgin;
+  last_msg_ms = millis();
   float s = msg->data;
   if (s < 0.0f) s = 0.0f;
   if (s > 1.0f) s = 1.0f;
@@ -270,25 +273,42 @@ void setup() {
     step_interval_us[i] = (unsigned long)(1e6f / (MAX_SPEED_RAD_S * JOINT_SPEED_FACTOR[i] * steps_per_rad[i]));
   }
 
-  // Connect WiFi and configure micro-ROS UDP transport to Pi agent
-  // set_microros_wifi_transports blocks until WiFi is connected
+  // ── WiFi bring-up ────────────────────────────────────────────────────────
+  // IMPORTANT ordering: set radio power policy BEFORE binding the micro-ROS
+  // UDP socket. On Arduino-ESP32 3.x, toggling WiFi.setSleep() after the
+  // UDP transport is created can briefly drop the link and silently
+  // invalidate the bound socket — rclc_support_init then "succeeds" but the
+  // CREATE_CLIENT packet never reaches the agent, so the agent log shows
+  // no session. Bringing WiFi up explicitly here also lets us print the IP
+  // before any uROS work and fail fast with a clear message if WiFi dies.
   Serial.printf("[WiFi] connecting to %s...\n", ssid);
-  set_microros_wifi_transports((char*)ssid, (char*)password,
-                               (char*)agent_ip, agent_port);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  unsigned long wifi_start = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    if (millis() - wifi_start > 30000) {
+      Serial.println("\n[WiFi] timeout after 30s — rebooting");
+      ESP.restart();
+    }
+    delay(250);
+    Serial.print(".");
+  }
+  Serial.printf("\n[WiFi] connected, IP: %s\n",
+                WiFi.localIP().toString().c_str());
 
   // Disable WiFi modem sleep: ESP32 default DTIM-based sleep wakes every
   // ~600-700 ms and starves the loop task, causing audible step pulsing.
+  // Done BEFORE set_microros_wifi_transports for socket stability.
   WiFi.setSleep(false);
 
-  // ElegantOTA — WiFi already connected above
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("[WiFi] connected, IP: %s\n", WiFi.localIP().toString().c_str());
-    MDNS.begin("ArmESP");
-    ElegantOTA.begin(&server);
-    server.begin();
-  } else {
-    Serial.println("[WiFi] NOT connected!");
-  }
+  // micro-ROS UDP transport — sees WiFi already up and just binds the socket.
+  set_microros_wifi_transports((char*)ssid, (char*)password,
+                               (char*)agent_ip, agent_port);
+
+  // ElegantOTA + mDNS
+  MDNS.begin("ArmESP");
+  ElegantOTA.begin(&server);
+  server.begin();
 
   delay(2000);
   uros_init();
@@ -318,19 +338,17 @@ void loop() {
   //   }
   // }
 
-  // --- micro-ROS: spin executor + ping-based disconnect detection ---
+  // --- micro-ROS: spin executor + watchdog ---
   if (uros_ok) {
     { unsigned long _t = micros(); rclc_executor_spin_some(&executor, RCL_MS_TO_NS(1)); dbg_time_executor_us += micros() - _t; }
 
-    // Passive watchdog — no blocking ping. If no message received for UROS_WATCHDOG_MS,
-    // assume the agent has gone away and schedule a reconnect.
-    // NOTE: do NOT call uros_cleanup() here — the reconnect branch does it once.
-    // Calling cleanup twice (here + reconnect loop) corrupts the transport layer.
     unsigned long now_ms = millis();
+
+    // Watchdog: if no message has arrived in UROS_WATCHDOG_MS, reconnect.
     if (last_msg_ms > 0 && (now_ms - last_msg_ms) >= UROS_WATCHDOG_MS) {
       uros_ok = false;
       last_msg_ms = 0;
-      Serial.println("[uROS] watchdog: no msgs, reconnecting");
+      Serial.println("[uROS] watchdog: idle 60s, reconnecting");
     }
   } else {
     // Retry connecting to agent periodically
