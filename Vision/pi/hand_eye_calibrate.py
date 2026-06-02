@@ -73,7 +73,7 @@ class HandEyeNode(Node):
         self.rows = p("inner_rows", 6).value
         self.square_m = p("square_mm", 23.25).value / 1000.0
         self.count = p("count", 18).value
-        self.min_move_m = p("min_move_m", 0.04).value     # new-pose ee-translation threshold
+        self.min_move_m = p("min_move_m", 0.025).value    # new-pose ee-translation threshold
         self.still_px = p("still_px", 3.0).value          # board-centroid stillness threshold
         self.reproj_max = p("reproj_max_px", 2.0).value   # reject scrambled detections; oblique views run ~1-1.5px
         self.j4_max = p("j4_max_rad", 0.1).value           # reject poses with wrist roll off zero (bad scale -> bad FK)
@@ -205,8 +205,8 @@ class HandEyeNode(Node):
         if self._done:
             return
         n = len(self.R_g2b)
-        if n < 5:
-            self.get_logger().warn(f"only {n} poses; need >=5 (12-20 recommended). Keep going.")
+        if n < 4:
+            self.get_logger().warn(f"only {n} poses; need >=4 (12-20 recommended). Keep going.")
             return
         self._done = True
 

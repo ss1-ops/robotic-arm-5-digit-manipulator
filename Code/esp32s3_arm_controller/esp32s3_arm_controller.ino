@@ -50,15 +50,18 @@ const float   DEG_PER_STEP[5]   = {1.8,      1.8,     1.8,      1.8,       1.8 }
 const float   GEAR_RATIO[5]     = {5.0,      1.0,     5.0,      5.0,       1.0 };
 const float   BELT_RATIO[5]     = {14.45625f, 5.11875f, 4.65304275f, 1.0f, 4.0f};
 // Per-joint direction invert (true = flip HIGH/LOW on DIR pin)
-const bool    DIR_INVERT[5]     = {false,    true,    false,    false,     true};
+// j4 (wrist roll) was reversed vs the URDF (physical +cmd = RHR- about Z) -> flipped.
+const bool    DIR_INVERT[5]     = {false,    true,    false,    true,      true};
 // Per-joint speed ceiling as a fraction of MAX_SPEED_RAD_S (1.0 = full speed)
 const float   JOINT_SPEED_FACTOR[5] = {1.0f, 0.5f,   1.0f,     1.0f,      1.0f};
 // Empirical calibration: ratio of (radians commanded) to (radians physically moved).
 // Measured by commanding a known angle and observing actual joint rotation.
 // < 1.0 → arm overshoots (too many steps); > 1.0 → arm undershoots.
 //                                   Waist   Shoulder  Elbow   WristRoll  WristPitch
-//   measurement:              90°→1.15r  90°→1.60r 90°→1.48r  (removed)  90°→1.70r
-const float   CALIB_FACTOR[5] = {1.15f/(PI/2), 1.60f/(PI/2), 1.48f/(PI/2), 1.0f, 1.70f/(PI/2)};
+// External angle measure (2026-06-02), per command: j1 ~ok; j2 1rad->56deg;
+// j3 1rad->61deg; j5 1rad->54deg; j4 3.2rad->90deg. CALIB scaled so cmd == physical
+// (new = old * commanded/actual): j2 *1.023, j3 *0.939, j4 *2.037, j5 *1.061.
+const float   CALIB_FACTOR[5] = {1.15f/(PI/2), 1.0422f, 0.8850f, 2.0372f, 1.1483f};
 
 float steps_per_rad[5];
 unsigned long step_interval_us[5];
