@@ -57,8 +57,8 @@ const float   JOINT_SPEED_FACTOR[5] = {1.0f, 0.5f,   1.0f,     1.0f,      1.0f};
 // Measured by commanding a known angle and observing actual joint rotation.
 // < 1.0 → arm overshoots (too many steps); > 1.0 → arm undershoots.
 //                                   Waist   Shoulder  Elbow   WristRoll  WristPitch
-//   measurement:              90°→1.15r  90°→1.60r 90°→1.48r 180°→0.81r  90°→1.70r
-const float   CALIB_FACTOR[5] = {1.15f/(PI/2), 1.60f/(PI/2), 1.48f/(PI/2), 0.81f/PI, 1.70f/(PI/2)};
+//   measurement:              90°→1.15r  90°→1.60r 90°→1.48r  (removed)  90°→1.70r
+const float   CALIB_FACTOR[5] = {1.15f/(PI/2), 1.60f/(PI/2), 1.48f/(PI/2), 1.0f, 1.70f/(PI/2)};
 
 float steps_per_rad[5];
 unsigned long step_interval_us[5];

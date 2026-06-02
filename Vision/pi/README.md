@@ -60,6 +60,33 @@ For a visual check, on a machine with a display:
 ros2 run rqt_image_view rqt_image_view /stereo/left/image_raw
 ```
 
+## Hand-eye calibration (`hand_eye_calibrate.py`)
+
+Finds `T_ee_cam` so camera-frame targets map into the arm base frame
+(`p_base = T_base_ee @ T_ee_cam @ p_cam`). Eye-in-hand; uses tf2 for `T_base_ee`
+(from `robot_state_publisher`) and solvePnP on the rectified left image.
+
+Prereqs running: `stereo_camera_node` (for `/stereo/left/image_raw`) **and** the
+robot description / `robot_state_publisher` (so `base_frame -> ee_frame` is in TF).
+
+1. Find the end-effector link name (the link the camera is rigidly bolted to):
+   ```bash
+   ros2 run tf2_tools view_frames     # or read the warn output listing TF frames
+   ```
+2. Clamp the checkerboard somewhere **fixed** in the workspace.
+3. Run, then jog the arm (GUI / moveo_publisher) to ~18 varied poses that all keep
+   the board in the left lens. It auto-captures when the arm is still and the pose
+   is new (watch the log; `ros2 topic echo` is unreliable over ssh here).
+   ```bash
+   python3 hand_eye_calibrate.py --ros-args \
+       -p calib:=$PWD/stereo_calib.yaml \
+       -p base_frame:=base_link -p ee_frame:=<link> \
+       -p inner_cols:=8 -p inner_rows:=6 -p square_mm:=23.25
+   ```
+4. After `--count` poses (or publish `std_msgs/Empty` to `/hand_eye/finish`) it
+   writes `hand_eye.yaml` and prints a consistency residual (board-position spread;
+   aim for <~5 mm / <~1°). Recapture with more varied poses if it's high.
+
 ## Notes
 
 - **MJPEG is mandatory** for 2560x960 over USB2; the node forces it. If you see a

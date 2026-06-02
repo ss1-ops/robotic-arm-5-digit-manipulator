@@ -78,6 +78,12 @@ class StereoCameraNode(Node):
         self.width = self.declare_parameter("width", 2560).value      # full side-by-side width
         self.height = self.declare_parameter("height", 960).value
         self.fps = self.declare_parameter("fps", 30).value
+        # The camera is mounted upside down, but flipping a side-by-side stereo frame
+        # in software can't recover the (upright) calibration's rectification (it swaps
+        # the physical L/R cameras; rectification is role-specific). So we stream RAW
+        # as-mounted frames and recalibrate in this orientation; keep this False.
+        # (Per-half rotation kept only as an option; it does NOT fix stereo geometry.)
+        self.rotate_180 = self.declare_parameter("rotate_180", False).value
         self.calib_path = self.declare_parameter("calib", "").value
         self.left_frame = self.declare_parameter("left_frame", "stereo_left_optical").value
         self.right_frame = self.declare_parameter("right_frame", "stereo_right_optical").value
@@ -103,11 +109,19 @@ class StereoCameraNode(Node):
 
     def _open_camera(self):
         dev = self.device_path if self.device_path else int(self.device)
-        cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
-        if not cap.isOpened():
+        # Retry: on restart the previous node's USB handle can take a moment to release.
+        cap = None
+        for attempt in range(6):
+            cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
+            if cap.isOpened():
+                break
+            cap.release()
+            self.get_logger().warn(f"camera '{dev}' open attempt {attempt + 1}/6 failed; retrying...")
+            time.sleep(1.0)
+        if cap is None or not cap.isOpened():
             raise RuntimeError(
-                f"cannot open camera '{dev}'. Check `v4l2-ctl --list-devices` and that "
-                "the user is in the 'video' group.")
+                f"cannot open camera '{dev}' after retries. Check `lsusb | grep 32e4`, "
+                "that /dev/video0 exists, and that the user is in the 'video' group.")
         # Order matters: MJPG first, then resolution (MJPG needed for 2560x960 / USB2).
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
@@ -144,6 +158,13 @@ class StereoCameraNode(Node):
             half = frame.shape[1] // 2
             left = frame[:, :half]
             right = frame[:, half:2 * half]
+            if self.rotate_180:
+                # Upside-down mount rotates each lens image 180 on its sensor, but the
+                # hardware still reads sensor0->left half / sensor1->right half. So
+                # rotate each half INDEPENDENTLY (a full-frame rotation would wrongly
+                # swap the lenses, feeding sensor1 into the left topic with K1's maps).
+                left = cv2.rotate(left, cv2.ROTATE_180)
+                right = cv2.rotate(right, cv2.ROTATE_180)
 
             stamp = self.get_clock().now().to_msg()
             self.pub_l.publish(self._to_image_msg(stamp, self.left_frame, np.ascontiguousarray(left)))

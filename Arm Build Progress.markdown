@@ -195,10 +195,30 @@ existing `moveo_publisher` TCP interface (`armpi.local:9000`, `{"cartesian":[x,y
      [nearest|color] / `stop_vision.sh`. NOTE: `ros2 topic echo` is unreliable over
      non-interactive ssh here (DDS discovery doesn't complete) — read the node's own
      logs (`/tmp/depth.log`) instead.
-  5. **Hand-eye calibration (NEXT, needs arm live):** `cv2.calibrateHandEye` →
-     `T_ee_cam`, to map `/stereo/target/point` (camera frame) into base frame.
-  6. Distance-gated approach controller feeding `moveo_publisher` cartesian/trajectory.
-  7. "Point at object" demo end-to-end.
+  5. **Hand-eye calibration ATTEMPTED, ABANDONED (2026-06-01):**
+     `Vision/pi/hand_eye_calibrate.py` (reworked to use ikpy FK on /joint_commands —
+     no robot_state_publisher/TF on this arm). Built capture + many diagnostics
+     (reproj gate, j4 guard, pose-diversity, FK-vs-camera rotation check). After
+     fixing the camera side (recalibrated as-mounted for the **upside-down** wrist
+     mount — `capture_stereo_pi.py` + `stereo_calibrate.py` on the Pi; baseline
+     59.95mm OK) and getting clean detections (reproj ~0.5px) and 19-27deg rotation
+     diversity, the residual stayed ~250-380mm / 50-130deg. The **FK-vs-camera
+     rotation mismatch = 56deg mean (175 max)** is the smoking gun: the open-loop
+     arm's *commanded* joint angles don't match its *physical* pose (no encoders,
+     relative/cumulative stepper motion, imperfect joint scales, no homing). Hand-eye
+     fundamentally needs accurate robot poses, so it is **infeasible on this arm**.
+  6. **PIVOT — image-based visual servoing (IBVS):** close the loop on the CAMERA,
+     not on FK. Detect target image error -> jog the arm to reduce it -> repeat. No
+     accurate FK / hand-eye needed; robust to the open-loop errors above; natural for
+     eye-in-hand. Still delivers point-at-object + distance-gated approach. (Building.)
+  7. "Point at object" demo end-to-end (via IBVS).
+
+  Camera note: mount is **upside down**. Software flip can't recover the upright
+  calibration's stereo rectification (it swaps the physical L/R cameras; rectification
+  is role-specific). So the driver streams RAW frames (`rotate_180=false`) and we
+  recalibrated in that orientation; the browser stream display-rotates for viewing
+  only. The GUI (`moveo_simple_controller.py`) now starts the vision stack on Connect
+  SSH via `Vision/pi/start_vision.sh` (camera + MJPEG stream at :8080).
 - Then: grasp sequencing (approach/close/retreat) using the fully-actuated hand.
 - Later: migrate hand servos to ESP32-S3 + serial bus for closed-loop feedback.
 - Later: migrate stepper control fully to ESP32-S3 micro-ROS (in progress separately).

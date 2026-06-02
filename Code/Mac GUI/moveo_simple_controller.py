@@ -18,15 +18,18 @@ import math
 import shlex
 import sys
 import threading
+import time
+import urllib.request
 from dataclasses import dataclass
 
 import paramiko
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QSlider, QLineEdit, QPushButton, QGroupBox, QGridLayout,
-    QPlainTextEdit, QMessageBox,
+    QPlainTextEdit, QMessageBox, QSizePolicy,
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QObject
+from PyQt5.QtGui import QImage, QPixmap
 
 
 # ── Joint definitions ──────────────────────────────────────────────────────────
@@ -46,6 +49,7 @@ JOINTS = [
 
 SLIDER_SCALE   = 100   # slider integer units per radian
 PUBLISHER_PORT = 9000  # TCP port on the Pi where moveo_publisher.py listens
+CAMERA_URL     = "http://armpi.local:8080/"  # MJPEG stream from the Pi camera
 
 
 # ── Worker ─────────────────────────────────────────────────────────────────────
@@ -109,6 +113,16 @@ class Worker(QObject):
         '  && echo "[startup] moveo_publisher ready on :9000" '
         '  || { echo "[startup] ERROR: publisher failed"; cat /tmp/moveo_publisher.log; }'
     )
+    _CMD_VISION = (
+        # Start the stereo camera node + browser MJPEG stream (detached).
+        # Camera streams raw (as-mounted) frames; the stream display-rotates for viewing.
+        "source /opt/ros/jazzy/setup.bash; "
+        "bash ~/vision/start_vision.sh > /tmp/vision_start.log 2>&1; "
+        "sleep 1; "
+        "pgrep -f stereo_camera_node > /dev/null "
+        '  && echo "[startup] vision up — view: http://armpi.local:8080/" '
+        '  || { echo "[startup] WARNING: vision not running"; cat /tmp/vision_start.log; }'
+    )
 
     def __init__(self):
         super().__init__()
@@ -136,6 +150,7 @@ class Worker(QObject):
             self._ssh_step("agent",     self._CMD_AGENT,     timeout=20)
             self._ssh_step("esp32",     self._CMD_ESP32,     timeout=12)
             self._ssh_step("publisher", self._CMD_PUBLISHER, timeout=20)
+            self._ssh_step("vision",    self._CMD_VISION,    timeout=20)
 
             self._open_channel()
             self.connected = True
@@ -294,12 +309,66 @@ class Worker(QObject):
                     except Exception: pass
 
 
+# ── Camera worker ───────────────────────────────────────────────────────────────
+class CameraWorker(QObject):
+    """Reads an MJPEG stream over HTTP and emits decoded frames as QImage.
+
+    Runs in its own daemon thread; reconnects automatically on error. JPEG
+    frames are located by their SOI/EOI markers so it works with mjpg-streamer
+    style multipart streams regardless of the boundary string.
+    """
+    frame  = pyqtSignal(QImage)
+    status = pyqtSignal(str)   # human-readable connection state
+
+    def __init__(self, url: str):
+        super().__init__()
+        self.url = url
+        self._running = False
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def stop(self):
+        self._running = False
+
+    def _run(self):
+        while self._running:
+            try:
+                self.status.emit("connecting…")
+                stream = urllib.request.urlopen(self.url, timeout=5)
+                self.status.emit("")
+                buf = b""
+                while self._running:
+                    chunk = stream.read(4096)
+                    if not chunk:
+                        break               # stream ended — reconnect
+                    buf += chunk
+                    start = buf.find(b"\xff\xd8")          # JPEG SOI
+                    end   = buf.find(b"\xff\xd9", start + 2) if start != -1 else -1
+                    if start != -1 and end != -1:
+                        jpg = buf[start:end + 2]
+                        buf = buf[end + 2:]
+                        img = QImage.fromData(jpg, "JPG")
+                        if not img.isNull():
+                            self.frame.emit(img)
+                    # Guard against runaway growth if markers never align
+                    if len(buf) > 2_000_000:
+                        buf = buf[-1_000_000:]
+            except Exception as e:
+                if self._running:
+                    self.status.emit(f"offline — {e}")
+                    time.sleep(2)
+
+
 # ── Main window ───────────────────────────────────────────────────────────────
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Moveo Arm — Simple Controller")
-        self.resize(820, 680)
+        self.resize(1140, 700)
 
         self._worker = Worker()
         self._worker.log.connect(self._append_log)
@@ -441,6 +510,9 @@ class MainWindow(QMainWindow):
         action_row.addWidget(self._btn_estop)
         vlay.addLayout(action_row)
 
+        # Bottom row: console (left half) + camera viewer (right half)
+        bottom_row = QHBoxLayout()
+
         # Console
         console_box = QGroupBox("Console")
         cv = QVBoxLayout(console_box)
@@ -450,15 +522,73 @@ class MainWindow(QMainWindow):
         self._console.setStyleSheet(
             "background:#1e1e1e; color:#d4d4d4; font-family:Menlo,monospace; font-size:12px;"
         )
-        self._console.setFixedHeight(220)
+        self._console.setMinimumHeight(220)
         cv.addWidget(self._console)
         btn_clear = QPushButton("Clear")
         btn_clear.setFixedWidth(70)
         btn_clear.clicked.connect(self._console.clear)
         cv.addWidget(btn_clear, alignment=Qt.AlignRight)
-        vlay.addWidget(console_box)
+        bottom_row.addWidget(console_box, 1)
+
+        # Camera viewer — width hugs the stream (no side letterboxing)
+        cam_box = QGroupBox("Camera")
+        cam_box.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        camv = QVBoxLayout(cam_box)
+        self._cam_label = QLabel("camera:\nconnecting…")
+        self._cam_label.setAlignment(Qt.AlignCenter)
+        self._cam_label.setMinimumSize(160, 120)
+        self._cam_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Ignored)
+        self._cam_label.setStyleSheet("background:#000; color:#888;")
+        camv.addWidget(self._cam_label)
+        bottom_row.addWidget(cam_box, 0)
+
+        vlay.addLayout(bottom_row)
 
         self._set_controls_enabled(False)
+
+        # Start the camera stream (independent of the SSH/ROS connection)
+        self._last_frame: QImage | None = None
+        self._camera = CameraWorker(CAMERA_URL)
+        self._camera.frame.connect(self._on_camera_frame)
+        self._camera.status.connect(self._on_camera_status)
+        self._camera.start()
+
+    def _on_camera_frame(self, img: QImage):
+        self._last_frame = img
+        self._update_camera_pixmap()
+
+    def _on_camera_status(self, msg: str):
+        if msg:
+            self._cam_label.setText(f"camera: {msg}")
+
+    def _update_camera_pixmap(self):
+        if self._last_frame is None or self._last_frame.isNull():
+            return
+        # Lock the panel to a 4:3 box (width = height * 4/3, driven by the
+        # console height). Fill it by expanding + centre-cropping so there are
+        # no black side bars and no distortion.
+        h = max(self._cam_label.height(), 120)
+        w = round(h * 4 / 3)
+        self._cam_label.setFixedWidth(w)
+        pm = QPixmap.fromImage(self._last_frame).scaled(
+            w, h, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+        )
+        if pm.width() != w or pm.height() != h:
+            x = (pm.width()  - w) // 2
+            y = (pm.height() - h) // 2
+            pm = pm.copy(x, y, w, h)
+        self._cam_label.setPixmap(pm)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_camera_pixmap()
+
+    def closeEvent(self, event):
+        try:
+            self._camera.stop()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
     def _on_ik_angles(self, angles: list):
         """Sync sliders and internal state after a successful IK command."""
