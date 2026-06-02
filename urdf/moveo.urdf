@@ -1,0 +1,117 @@
+<?xml version="1.0"?>
+<!--
+  moveo.urdf — clean kinematic URDF for the BCN3D Moveo (5-DOF), matching the
+  ikpy MOVEO_CHAIN in moveo_publisher.py (single source of truth).
+
+  Replaces the CAD-exported moveo_clean.urdf, which had a spurious ~0.24 m base
+  Y-offset and messy CAD frame rotations. This model:
+    * stacks straight up +Z at home (all joints 0) — EE at (0, 0, 0.797)
+    * clean joint axes: J1 yaw (Z), J2/J3/J5 pitch (X), J4 wrist roll (Z)
+    * link lengths (m) from the CAD joint-to-joint distances:
+        base->J1 0.130, J1->J2 0.183, J2->J3 0.221, J3->J4 0.170,
+        J4->J5 0.053, J5->tip 0.040
+  Simple cylinder visuals so it displays correctly in RViz.
+-->
+<robot name="moveo">
+
+  <material name="grey">  <color rgba="0.6 0.6 0.6 1"/></material>
+  <material name="blue">  <color rgba="0.2 0.4 0.8 1"/></material>
+  <material name="orange"><color rgba="0.9 0.5 0.1 1"/></material>
+
+  <!-- base column: base plate up to the waist (J1) axis -->
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.065" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.045" length="0.130"/></geometry>
+      <material name="grey"/>
+    </visual>
+    <inertial><mass value="1.0"/><inertia ixx="0.01" iyy="0.01" izz="0.01" ixy="0" ixz="0" iyz="0"/></inertial>
+  </link>
+
+  <joint name="Joint_1" type="revolute">    <!-- waist / yaw -->
+    <parent link="base_link"/><child link="Link_1"/>
+    <origin xyz="0 0 0.130" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.00" upper="2.40" effort="10" velocity="2"/>
+  </joint>
+
+  <link name="Link_1">                       <!-- waist -> shoulder -->
+    <visual>
+      <origin xyz="0 0 0.0915" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.038" length="0.183"/></geometry>
+      <material name="blue"/>
+    </visual>
+    <inertial><mass value="0.8"/><inertia ixx="0.005" iyy="0.005" izz="0.005" ixy="0" ixz="0" iyz="0"/></inertial>
+  </link>
+
+  <joint name="Joint_2" type="revolute">    <!-- shoulder / pitch -->
+    <parent link="Link_1"/><child link="Link_2"/>
+    <origin xyz="0 0 0.183" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-1.95" upper="1.95" effort="10" velocity="2"/>
+  </joint>
+
+  <link name="Link_2">                       <!-- upper arm: shoulder -> elbow -->
+    <visual>
+      <origin xyz="0 0 0.1105" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.032" length="0.221"/></geometry>
+      <material name="orange"/>
+    </visual>
+    <inertial><mass value="0.6"/><inertia ixx="0.004" iyy="0.004" izz="0.004" ixy="0" ixz="0" iyz="0"/></inertial>
+  </link>
+
+  <joint name="Joint_3" type="revolute">    <!-- elbow / pitch -->
+    <parent link="Link_2"/><child link="Link_3"/>
+    <origin xyz="0 0 0.221" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-2.20" upper="2.20" effort="10" velocity="2"/>
+  </joint>
+
+  <link name="Link_3">                       <!-- forearm: elbow -> wrist roll -->
+    <visual>
+      <origin xyz="0 0 0.085" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.026" length="0.170"/></geometry>
+      <material name="blue"/>
+    </visual>
+    <inertial><mass value="0.4"/><inertia ixx="0.002" iyy="0.002" izz="0.002" ixy="0" ixz="0" iyz="0"/></inertial>
+  </link>
+
+  <joint name="Joint_4" type="revolute">    <!-- wrist roll (about forearm) -->
+    <parent link="Link_3"/><child link="Link_4"/>
+    <origin xyz="0 0 0.170" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.14" upper="3.14" effort="10" velocity="2"/>
+  </joint>
+
+  <link name="Link_4">                       <!-- wrist roll -> wrist pitch -->
+    <visual>
+      <origin xyz="0 0 0.0265" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.024" length="0.053"/></geometry>
+      <material name="orange"/>
+    </visual>
+    <inertial><mass value="0.2"/><inertia ixx="0.001" iyy="0.001" izz="0.001" ixy="0" ixz="0" iyz="0"/></inertial>
+  </link>
+
+  <joint name="Joint_5" type="revolute">    <!-- wrist pitch -->
+    <parent link="Link_4"/><child link="Link_5"/>
+    <origin xyz="0 0 0.053" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-1.75" upper="1.75" effort="10" velocity="2"/>
+  </joint>
+
+  <link name="Link_5">                       <!-- wrist pitch -> tool tip -->
+    <visual>
+      <origin xyz="0 0 0.020" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.020" length="0.040"/></geometry>
+      <material name="grey"/>
+    </visual>
+    <inertial><mass value="0.15"/><inertia ixx="0.0005" iyy="0.0005" izz="0.0005" ixy="0" ixz="0" iyz="0"/></inertial>
+  </link>
+
+  <joint name="Joint_ee" type="fixed">       <!-- tool / end-effector tip -->
+    <parent link="Link_5"/><child link="ee_link"/>
+    <origin xyz="0 0 0.040" rpy="0 0 0"/>
+  </joint>
+  <link name="ee_link"/>
+
+</robot>
