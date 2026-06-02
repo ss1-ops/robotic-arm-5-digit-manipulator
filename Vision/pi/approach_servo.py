@@ -51,7 +51,8 @@ class ApproachNode(Node):
         self.host = p("host", "127.0.0.1").value
         self.port = p("port", 9000).value
         self.jog = p("jog_rad", 0.08).value
-        self.gain = p("gain", 0.35).value
+        self.gain = p("gain", 0.25).value          # lower = smoother (less overshoot)
+        self.damp = p("damp", 20.0).value          # DLS damping (higher = smoother/slower)
         self.tol_px = p("tol_px", 25.0).value          # centring tolerance
         self.tol_spread = p("tol_spread_px", 8.0).value # size tolerance
         self.target_spread = p("spread_target_px", 0.0).value  # 0 => auto
@@ -154,13 +155,21 @@ class ApproachNode(Node):
                 self.get_logger().error("lost board during Jacobian probe."); return
             J[:, k] = (fp - fm) / (2 * self.jog)
             self.get_logger().info(f"  j{ji+1}: d(u,v,s)/dq = {J[:,k].round(0)}")
-        Jpinv = J.T @ np.linalg.inv(J @ J.T + 1e1 * np.eye(3))
+        Jpinv = J.T @ np.linalg.inv(J @ J.T + self.damp * np.eye(3))
 
         self.get_logger().info("servoing (centre + approach)...")
+        f_prev = dq_prev = None
         for it in range(self.max_iters):
             f = self._measure()
             if f is None:
                 self.get_logger().warn(f"[{it}] board lost — holding."); continue
+            # Broyden rank-1 update: keep J current as the arm moves (the centring
+            # response changes as the arm extends), which removes servo oscillation.
+            if f_prev is not None and dq_prev is not None:
+                denom = float(dq_prev @ dq_prev)
+                if denom > 1e-6:
+                    J = J + np.outer((f - f_prev) - J @ dq_prev, dq_prev) / denom
+                    Jpinv = J.T @ np.linalg.inv(J @ J.T + self.damp * np.eye(3))
             with self._lock:
                 ctr = self._center.copy()
             goal[:2] = ctr
@@ -178,6 +187,7 @@ class ApproachNode(Node):
             for k, ji in enumerate(self.ctrl):
                 q[ji] += dq[k]
             q = self._send(q)
+            f_prev, dq_prev = f.copy(), dq.copy()
             self.get_logger().info(f"[{it}] centre={centre_err:4.0f}px size_err={size_err:+5.0f}px "
                                    f"spread={f[2]:4.0f}  dq={dq.round(3)}")
         self.get_logger().warn("max iterations — lower gain / raise settle, or recheck the board.")
