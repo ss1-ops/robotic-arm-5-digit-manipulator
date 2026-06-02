@@ -7,9 +7,8 @@
   Y-offset and messy CAD frame rotations. This model:
     * stacks straight up +Z at home (all joints 0) — EE at (0, 0, 0.797)
     * clean joint axes: J1 yaw (Z), J2/J3/J5 pitch (X), J4 wrist roll (Z)
-    * link lengths (m) from the CAD joint-to-joint distances:
-        base->J1 0.130, J1->J2 0.183, J2->J3 0.221, J3->J4 0.170,
-        J4->J5 0.053, J5->tip 0.040
+    * link lengths (m): base->J1 0.170 (measured); CAD joint-to-joint for the rest:
+        J1->J2 0.183, J2->J3 0.221, J3->J4 0.170, J4->J5 0.053, J5->tip 0.040
   Simple cylinder visuals so it displays correctly in RViz.
 -->
 <robot name="moveo">
@@ -21,8 +20,8 @@
   <!-- base column: base plate up to the waist (J1) axis -->
   <link name="base_link">
     <visual>
-      <origin xyz="0 0 0.065" rpy="0 0 0"/>
-      <geometry><cylinder radius="0.045" length="0.130"/></geometry>
+      <origin xyz="0 0 0.085" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.045" length="0.170"/></geometry>
       <material name="grey"/>
     </visual>
     <inertial><mass value="1.0"/><inertia ixx="0.01" iyy="0.01" izz="0.01" ixy="0" ixz="0" iyz="0"/></inertial>
@@ -30,7 +29,7 @@
 
   <joint name="Joint_1" type="revolute">    <!-- waist / yaw -->
     <parent link="base_link"/><child link="Link_1"/>
-    <origin xyz="0 0 0.130" rpy="0 0 0"/>
+    <origin xyz="0 0 0.170" rpy="0 0 0"/>
     <axis xyz="0 0 1"/>
     <limit lower="-2.00" upper="2.40" effort="10" velocity="2"/>
   </joint>

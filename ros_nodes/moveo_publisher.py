@@ -45,7 +45,7 @@ TCP_PORT    = 9000
 # distances (2026-06-02), replacing the earlier approximate guesses. The waist and
 # wrist segments were previously missing (j2/j5 had zero offset). Spot-check against
 # the physical arm if you want grasp-accurate FK.
-_L_BASE  = 0.130   # base plate to waist (J1) axis (yaw-axis height)
+_L_BASE  = 0.170   # base plate to waist (J1) axis (measured; CAD URDF said 0.13)
 _L_WAIST = 0.183   # waist (J1) to shoulder (J2) pivot
 _L_UPPER = 0.221   # shoulder (J2) to elbow (J3) pivot (upper arm)
 _L_FORE  = 0.170   # elbow (J3) to wrist-roll (J4) pivot (forearm)
