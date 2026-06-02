@@ -75,7 +75,9 @@ class StereoDepthNode(Node):
         p = self.declare_parameter
         self.calib_path = p("calib", "").value
         self.scale = p("scale", 0.5).value
-        self.detector = p("detector", "nearest").value          # nearest | color
+        self.detector = p("detector", "nearest").value          # nearest | color | board
+        self.bcols = p("inner_cols", 8).value                    # for detector=board
+        self.brows = p("inner_rows", 6).value
         self.near_cm = p("near_cm", 8.0).value
         self.far_cm = p("far_cm", 120.0).value                   # the distance gate
         self.min_area = p("min_area_px", 400).value
@@ -129,6 +131,16 @@ class StereoDepthNode(Node):
 
     def _detect(self, bgr, disp, valid, dist_cm):
         """Return ((u,v), mask_or_None) for the target, or (None, mask)."""
+        if self.detector == "board":
+            # Rock-stable target for servoing/diagnostics: the checkerboard centroid.
+            gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+            okb, corners = cv2.findChessboardCorners(
+                gray, (self.bcols, self.brows),
+                cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE | cv2.CALIB_CB_FAST_CHECK)
+            if not okb:
+                return None, None
+            c = corners.reshape(-1, 2).mean(axis=0)
+            return (int(c[0]), int(c[1])), None
         if self.detector == "color":
             hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
             mask = cv2.inRange(hsv, self.hsv_lo, self.hsv_hi)
