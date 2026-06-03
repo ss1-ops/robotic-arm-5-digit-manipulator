@@ -60,6 +60,8 @@ class GotoObject(Node):
         self.gain = p("center_gain", 0.5).value
         self.settle = p("settle_s", 1.2).value
         self.max_center = p("max_center_iters", 12).value
+        self.n_samples = p("measure_samples", 5).value   # median over N frames (noise reject)
+        self.max_reach = p("max_reach_m", 0.42).value    # clamp far targets to this (from J1 axis)
         self.host = p("host", "127.0.0.1").value
         self.port = p("port", 9000).value
 
@@ -122,16 +124,22 @@ class GotoObject(Node):
             return {}
 
     def _measure(self):
-        """Settle, then return the latest TRACK camera-frame point, or None."""
+        """Settle, then return the MEDIAN of several TRACK points (rejects single
+        noisy depth frames that would otherwise throw the centering servo off)."""
         time.sleep(self.settle)
-        for _ in range(40):
+        samples = []
+        for _ in range(60):
             with self._lock:
                 t = None if self._pt is None else self._pt.copy()
                 s = self._state
             if t is not None and s == "TRACK":
-                return t
-            time.sleep(0.1)
-        return None
+                samples.append(t)
+                if len(samples) >= self.n_samples:
+                    break
+            time.sleep(0.05)
+        if len(samples) < max(1, self.n_samples // 2):
+            return None
+        return np.median(np.array(samples), axis=0)
 
     # ── main sequence ──
     def _run(self):
@@ -208,9 +216,21 @@ class GotoObject(Node):
             qcur = self._q.copy()
         T = fk_base_ee(qcur)                                  # base<-EE (internal frame)
         obj_ee = CAM_T + np.array([f[0], f[1], d])            # object in EE frame
-        obj_user = to_user((T @ np.append(obj_ee, 1.0))[:3])
+        obj_base = (T @ np.append(obj_ee, 1.0))[:3]
+        obj_user = to_user(obj_base)
         tgt_ee = CAM_T + np.array([f[0], f[1], max(0.05, d - self.standoff)])
-        tgt_user = to_user((T @ np.append(tgt_ee, 1.0))[:3])
+        tgt_base = (T @ np.append(tgt_ee, 1.0))[:3]
+        # Clamp to the arm's reach (measured from the J1 axis at z=L_BASE=0.17).
+        # If the object is too far, approach toward it to the limit rather than
+        # failing the IK outright.
+        ref = np.array([0.0, 0.0, 0.17])
+        vec = tgt_base - ref; dist = float(np.linalg.norm(vec))
+        if dist > self.max_reach:
+            tgt_base = ref + vec * (self.max_reach / dist)
+            self.get_logger().warn(
+                f"object is beyond reach ({dist*100:.0f}cm from base, max {self.max_reach*100:.0f}cm)"
+                f" — approaching to the reach limit; move it closer to actually grasp.")
+        tgt_user = to_user(tgt_base)
         self.get_logger().info(
             f"estimated location of target (base): "
             f"[{obj_user[0]:.3f}, {obj_user[1]:.3f}, {obj_user[2]:.3f}] m")
