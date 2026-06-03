@@ -83,6 +83,11 @@ _MAX_REACH = _L_UPPER + _L_FORE + _L_EE   # 0.464 m
 def solve_ik(xyz: list, current_joints: list = None) -> tuple:
     """Return ([j1..j5], fk_err_mm) for Cartesian target xyz (metres).
 
+    FRAME: callers use the robot/REP-103 convention +X=forward, +Y=left, +Z=up.
+    The internal kinematic chain is rotated 90° from this (its +X points to the
+    robot's LEFT, +Y points BEHIND), so we rotate the incoming target -90° about
+    Z into the chain frame: (x, y) -> (y, -x). Joint outputs are frame-independent.
+
     When current_joints ([j1..j5] radians) is provided, biases the solution
     toward the current configuration so the arm never flips elbow-up/down
     unexpectedly during continuous motion.
@@ -92,6 +97,9 @@ def solve_ik(xyz: list, current_joints: list = None) -> tuple:
     if not _IKPY_AVAILABLE or MOVEO_CHAIN is None:
         raise RuntimeError("ikpy is not installed on this Pi")
 
+    # User frame (+X forward, +Y left) -> internal chain frame (-90° about Z).
+    # Reassign xyz itself so the ikpy call (target_position=xyz) also uses it.
+    xyz = [xyz[1], -xyz[0], xyz[2]]
     x, y, z = xyz[0], xyz[1], xyz[2]
 
     # Reachability check — Euclidean distance from shoulder pivot to target
@@ -102,8 +110,19 @@ def solve_ik(xyz: list, current_joints: list = None) -> tuple:
             f"exceeds max reach {_MAX_REACH:.3f}m"
         )
 
-    # J1: waist azimuth toward target (prevents 180° flip local minima)
-    j1_guess = _math.atan2(y, x) if (abs(x) > 1e-4 or abs(y) > 1e-4) else 0.0
+    # J1: waist azimuth toward target. At j1=0 the arm's reach plane points to
+    # +Y (positive reach swings the tip toward +Y), so the reach DIRECTION is at
+    # azimuth +90°. To aim it straight at the target we must offset the target
+    # azimuth by -90°. Without this offset the seed is 90° off and the optimizer
+    # drifts to the "reach-behind" branch (waist ~+90° + 180° wrist roll), which
+    # physically looks like the arm bending backward for +X targets.
+    if abs(x) > 1e-4 or abs(y) > 1e-4:
+        j1_aim = _math.atan2(y, x) - _math.pi / 2.0
+        # wrap to (-pi, pi] then clamp to the reachable waist range
+        j1_aim = (j1_aim + _math.pi) % (2 * _math.pi) - _math.pi
+        j1_guess = max(-2.00, min(2.40, j1_aim))
+    else:
+        j1_guess = 0.0
 
     # 2R analytical pre-solve for J2, J3 warm starts (J5=0, wrist aligned).
     # Geometry: vertical chain — at home both links point along +Z.
@@ -137,7 +156,14 @@ def solve_ik(xyz: list, current_joints: list = None) -> tuple:
     # Then choose by joint-space continuity when current_joints is known,
     # otherwise by FK accuracy alone.
     _FK_THRESHOLD_M = 0.050  # 50 mm — reject clearly diverged solutions
-    candidates = []          # list of (fk_err_m, j_dist, result, fk_xyz)
+    # "naturalness" penalty: a contorted reach-behind pose uses a ~180° wrist
+    # roll (j4) and big bends; a clean front pose keeps j4 near 0. Penalising it
+    # breaks ties between two FK-equal solutions toward the relaxed front one.
+    def _naturalness(res):
+        j1_, j2_, j3_, j4_, j5_ = res[1], res[2], res[3], res[4], res[5]
+        return abs(j4_) + 0.25 * (abs(j2_) + abs(j3_) + abs(j5_))
+    candidates = []          # (fk_err_m, j_dist, naturalness, result, fk_xyz)
+    best_result, best_err, best_fk = None, float('inf'), (x, y, z)  # global fallback
     for warm in warm_starts:
         try:
             result = MOVEO_CHAIN.inverse_kinematics(target_position=xyz, initial_position=warm)
@@ -146,34 +172,30 @@ def solve_ik(xyz: list, current_joints: list = None) -> tuple:
         fk  = MOVEO_CHAIN.forward_kinematics(result)
         ex, ey, ez = fk[0, 3], fk[1, 3], fk[2, 3]
         fk_err = _math.sqrt((ex-x)**2 + (ey-y)**2 + (ez-z)**2)
+        if fk_err < best_err:                      # track best-ever for fallback
+            best_err, best_result, best_fk = fk_err, result, (ex, ey, ez)
         if fk_err > _FK_THRESHOLD_M:
             continue
         j_dist = 0.0
         if current_joints is not None:
             j_dist = _math.sqrt(sum((result[k+1] - current_joints[k])**2 for k in range(5)))
-        candidates.append((fk_err, j_dist, result, (ex, ey, ez)))
+        candidates.append((fk_err, j_dist, _naturalness(result), result, (ex, ey, ez)))
 
-    if not candidates:
-        # Fallback: no solution within threshold — return best FK error regardless
-        best_result, best_err, best_fk = None, float('inf'), (x, y, z)
-        for warm in warm_starts:
-            try:
-                result = MOVEO_CHAIN.inverse_kinematics(target_position=xyz, initial_position=warm)
-            except Exception:
-                continue
-            fk  = MOVEO_CHAIN.forward_kinematics(result)
-            ex, ey, ez = fk[0, 3], fk[1, 3], fk[2, 3]
-            err = _math.sqrt((ex-x)**2 + (ey-y)**2 + (ez-z)**2)
-            if err < best_err:
-                best_err, best_result, best_fk = err, result, (ex, ey, ez)
-    else:
-        # Sort: when current_joints known, prefer joint-space continuity to
-        # avoid elbow-up/down flips. Break ties with FK accuracy.
+    if candidates:
+        # When current_joints known, prefer joint-space continuity (avoid
+        # elbow-up/down flips); otherwise pick the most natural accurate pose.
+        # In both cases bucket FK error to mm so naturalness can break ties
+        # between two solutions that both reach the target.
         if current_joints is not None:
-            candidates.sort(key=lambda c: (c[1], c[0]))
+            candidates.sort(key=lambda c: (round(c[0] * 1000), c[1], c[2]))
         else:
-            candidates.sort(key=lambda c: c[0])
-        best_err, _, best_result, best_fk = candidates[0]
+            candidates.sort(key=lambda c: (round(c[0] * 1000), c[2]))
+        best_err, _, _, best_result, best_fk = candidates[0]
+
+    if best_result is None:
+        raise ValueError(
+            f"IK found no solution for target ({x:.3f},{y:.3f},{z:.3f}) — "
+            f"likely unreachable or singular")
 
     # For targets on the Z axis (x≈0, y≈0), J1 is degenerate — force to 0
     if abs(x) < 0.01 and abs(y) < 0.01:

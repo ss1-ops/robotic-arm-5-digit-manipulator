@@ -12,8 +12,11 @@ set -e
 export PATH="$HOME/.local/bin:$PATH"
 
 SKETCH_DIR="$HOME/sketches/esp32s3_arm_controller"
-FQBN="esp32:esp32:esp32s3"
-PORT="${1:-/dev/moveo_arduino}"
+# CDCOnBoot=cdc is REQUIRED: it routes Serial to the USB-CDC (the micro-ROS
+# transport). Without it Serial goes to the UART0 pins and the agent on
+# /dev/ttyACM0 sees nothing (the symptom that bit us flashing from the Pi).
+FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc"
+PORT="${1:-/dev/ttyACM0}"
 
 if [ ! -f "$SKETCH_DIR/esp32s3_arm_controller.ino" ]; then
   echo "ERROR: sketch not found at $SKETCH_DIR"
@@ -47,7 +50,7 @@ sleep 2
 echo "=== Restarting micro-ROS agent ==="
 cd ~/microros_ws
 source install/setup.bash
-nohup ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/moveo_arduino -b 1000000 \
+nohup ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyACM0 -b 115200 -v4 \
   > /tmp/micro_ros_agent.log 2>&1 &
 echo "Agent PID $! — log at /tmp/micro_ros_agent.log"
 

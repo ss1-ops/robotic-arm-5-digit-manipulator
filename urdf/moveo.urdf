@@ -113,4 +113,41 @@
   </joint>
   <link name="ee_link"/>
 
+  <!-- ===== Eye-in-hand stereo camera mount (rigid to the EE) =====
+       From the Vision Mount + EE Adapter CAD, relative to the EE frame:
+       stereo midpoint 50 mm back (-X), cameras 60 mm apart along Y
+       (right +0.03, left -0.03). No Z offset specified -> taken at the EE frame.
+       These are the camera BODY centers. The *optical* frames (camera_*_optical)
+       carry the lens viewing direction for the cartesian go-to; their rpy is
+       PROVISIONAL until the optical-axis orientation is confirmed. -->
+  <joint name="camera_mount_joint" type="fixed">
+    <parent link="ee_link"/><child link="camera_mount"/>
+    <origin xyz="-0.05 0 0" rpy="0 0 0"/>
+  </joint>
+  <link name="camera_mount">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.018 0.080 0.018"/></geometry>
+      <material name="grey"/>
+    </visual>
+  </link>
+
+  <joint name="left_camera_joint" type="fixed">
+    <parent link="camera_mount"/><child link="left_camera"/>
+    <origin xyz="0 -0.03 0" rpy="0 0 0"/>
+  </joint>
+  <link name="left_camera">
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.015 0.015 0.015"/></geometry><material name="blue"/></visual>
+  </link>
+
+  <joint name="right_camera_joint" type="fixed">
+    <parent link="camera_mount"/><child link="right_camera"/>
+    <origin xyz="0 0.03 0" rpy="0 0 0"/>
+  </joint>
+  <link name="right_camera">
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.015 0.015 0.015"/></geometry><material name="orange"/></visual>
+  </link>
+
 </robot>

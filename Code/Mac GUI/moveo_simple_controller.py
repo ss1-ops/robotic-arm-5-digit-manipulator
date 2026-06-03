@@ -29,7 +29,7 @@ from PyQt5.QtWidgets import (
     QPlainTextEdit, QMessageBox, QSizePolicy,
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QObject
-from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtGui import QImage, QPixmap, QColor
 
 
 # ── Joint definitions ──────────────────────────────────────────────────────────
@@ -363,6 +363,15 @@ class CameraWorker(QObject):
                     time.sleep(2)
 
 
+# ── Clickable camera label ──────────────────────────────────────────────────────
+class ClickableLabel(QLabel):
+    """QLabel that emits the click position (in pixmap pixels) on mouse press."""
+    clicked = pyqtSignal(int, int)
+
+    def mousePressEvent(self, e):
+        self.clicked.emit(int(e.x()), int(e.y()))
+
+
 # ── Main window ───────────────────────────────────────────────────────────────
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -497,6 +506,10 @@ class MainWindow(QMainWindow):
         )
         self._btn_set_home.clicked.connect(self._set_as_home)
 
+        self._btn_stop_approach = QPushButton("✋ Stop Approach")
+        self._btn_stop_approach.setToolTip("Stop the click-to-go visual approach")
+        self._btn_stop_approach.clicked.connect(self._stop_approach)
+
         self._btn_estop = QPushButton("⛔  E-STOP")
         self._btn_estop.setStyleSheet(
             "background:#c0392b; color:white; font-weight:bold; padding:6px;"
@@ -507,6 +520,7 @@ class MainWindow(QMainWindow):
         action_row.addWidget(self._btn_home)
         action_row.addWidget(self._btn_set_home)
         action_row.addStretch()
+        action_row.addWidget(self._btn_stop_approach)
         action_row.addWidget(self._btn_estop)
         vlay.addLayout(action_row)
 
@@ -534,7 +548,9 @@ class MainWindow(QMainWindow):
         cam_box = QGroupBox("Camera")
         cam_box.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         camv = QVBoxLayout(cam_box)
-        self._cam_label = QLabel("camera:\nconnecting…")
+        self._cam_label = ClickableLabel("camera:\nclick an object to go to it")
+        self._cam_label.clicked.connect(self._on_camera_click)
+        self._cam_label.setCursor(Qt.CrossCursor)
         self._cam_label.setAlignment(Qt.AlignCenter)
         self._cam_label.setMinimumSize(160, 120)
         self._cam_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Ignored)
@@ -578,6 +594,59 @@ class MainWindow(QMainWindow):
             y = (pm.height() - h) // 2
             pm = pm.copy(x, y, w, h)
         self._cam_label.setPixmap(pm)
+
+    # ── Click-to-go visual approach ─────────────────────────────────────────────
+    def _on_camera_click(self, x, y):
+        if not self._worker.connected:
+            self._append_log("[approach] connect SSH first"); return
+        if self._estop:
+            self._append_log("[approach] release E-STOP first"); return
+        lo, hi = self._sample_hsv(x, y)
+        if lo is None:
+            self._append_log("[approach] click directly on a COLORED object"); return
+        self._append_log(f"[approach] going to object  HSV {lo}-{hi}, stop ~22cm  (✋ to abort)")
+        angles = [self._sliders[i].value() / SLIDER_SCALE for i in range(len(JOINTS))]
+        cmd = (f"bash ~/vision/run_approach_object.sh "
+               f"{lo[0]} {lo[1]} {lo[2]} {hi[0]} {hi[1]} {hi[2]} 0.22")
+
+        def _go():
+            self._worker._exec(cmd, timeout=15)
+            time.sleep(2.5)                     # let depth + approach nodes come up
+            self._worker.send_angles(angles)    # seed /joint_commands so the servo starts
+        threading.Thread(target=_go, daemon=True).start()
+
+    def _sample_hsv(self, x, y):
+        """Average a small patch at the click and return OpenCV HSV lo/hi range."""
+        pm = self._cam_label.pixmap()
+        if pm is None or pm.isNull():
+            return None, None
+        img = pm.toImage()
+        w, h = img.width(), img.height()
+        if not (0 <= x < w and 0 <= y < h):
+            return None, None
+        r = g = b = n = 0
+        for dx in range(-3, 4):
+            for dy in range(-3, 4):
+                px, py = x + dx, y + dy
+                if 0 <= px < w and 0 <= py < h:
+                    c = img.pixelColor(px, py)
+                    r += c.red(); g += c.green(); b += c.blue(); n += 1
+        col = QColor(r // n, g // n, b // n)
+        hh, ss, vv, _ = col.getHsv()            # h 0-359 (-1 if gray), s/v 0-255
+        if hh < 0 or ss < 40:
+            return None, None                   # achromatic — not color-trackable
+        hcv = hh // 2                           # OpenCV hue 0-179
+        dh, ds, dv = 12, 90, 90
+        lo = [max(0, hcv - dh), max(0, ss - ds), max(0, vv - dv)]
+        hi = [min(179, hcv + dh), min(255, ss + ds), min(255, vv + dv)]
+        return lo, hi
+
+    def _stop_approach(self):
+        if self._worker.connected:
+            threading.Thread(target=lambda: self._worker._exec(
+                "pkill -9 -f 'approach_object.py|approach_servo.py|stereo_depth_node.py' 2>/dev/null", timeout=8),
+                daemon=True).start()
+        self._append_log("[approach] stop sent")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

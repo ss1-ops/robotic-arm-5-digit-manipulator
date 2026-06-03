@@ -50,8 +50,8 @@ const float   DEG_PER_STEP[5]   = {1.8,      1.8,     1.8,      1.8,       1.8 }
 const float   GEAR_RATIO[5]     = {5.0,      1.0,     5.0,      5.0,       1.0 };
 const float   BELT_RATIO[5]     = {14.45625f, 5.11875f, 4.65304275f, 1.0f, 4.0f};
 // Per-joint direction invert (true = flip HIGH/LOW on DIR pin)
-// j4 (wrist roll) was reversed vs the URDF (physical +cmd = RHR- about Z) -> flipped.
-const bool    DIR_INVERT[5]     = {false,    true,    false,    true,      true};
+// j4 (wrist roll) turns opposite the waist; user asked to reverse it back -> false.
+const bool    DIR_INVERT[5]     = {false,    true,    false,    false,     true};
 // Per-joint speed ceiling as a fraction of MAX_SPEED_RAD_S (1.0 = full speed)
 const float   JOINT_SPEED_FACTOR[5] = {1.0f, 0.5f,   1.0f,     1.0f,      1.0f};
 // Empirical calibration: ratio of (radians commanded) to (radians physically moved).
