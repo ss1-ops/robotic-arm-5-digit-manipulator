@@ -309,6 +309,38 @@ class Worker(QObject):
                         if s: s.close()
                     except Exception: pass
 
+    def stream_approach_log(self):
+        """Tail ~/approach.log over SSH and mirror goto_object's progress into the
+        GUI log until it prints the finish sentinel (or a safety timeout)."""
+        path = f"/home/{self.USER}/approach.log"
+        try:
+            with self._ssh_lock:
+                ch = self._ssh.get_transport().open_session()
+                ch.exec_command(f"tail -n +1 -F {path} 2>/dev/null")
+            ch.settimeout(2.0)
+            buf = ""; t0 = time.time(); done = False
+            while not done and time.time() - t0 < 180:
+                try:
+                    data = ch.recv(4096).decode("utf-8", "replace")
+                except Exception:
+                    continue   # recv timeout — re-check the overall deadline
+                if not data:
+                    break
+                buf += data
+                while "\n" in buf:
+                    line, buf = buf.split("\n", 1)
+                    line = line.rstrip("\r")
+                    if not line.strip():
+                        continue
+                    i = line.find("[goto_object]: ")        # strip the ROS log prefix
+                    self.log.emit("[approach] " + (line[i + 15:] if i >= 0 else line))
+                    if "goto_object finished" in line:
+                        done = True; break
+            try: ch.close()
+            except Exception: pass
+        except Exception as e:
+            self.log.emit(f"[approach] (log stream error: {type(e).__name__})")
+
 
 # ── Camera worker ───────────────────────────────────────────────────────────────
 class CameraWorker(QObject):
@@ -618,6 +650,7 @@ class MainWindow(QMainWindow):
             self._worker.send_angles(angles)
             time.sleep(0.5)
             self._worker._exec(cmd, timeout=15)
+            self._worker.stream_approach_log()   # mirror goto_object's steps into the GUI log
         threading.Thread(target=_go, daemon=True).start()
 
     def _sample_hsv(self, x, y):
@@ -649,7 +682,7 @@ class MainWindow(QMainWindow):
     def _stop_approach(self):
         if self._worker.connected:
             threading.Thread(target=lambda: self._worker._exec(
-                "pkill -9 -f 'approach_object.py|approach_servo.py|stereo_depth_node.py' 2>/dev/null", timeout=8),
+                "pkill -9 -f 'approach_object.py|goto_object.py|approach_servo.py|stereo_depth_node.py' 2>/dev/null", timeout=8),
                 daemon=True).start()
         self._append_log("[approach] stop sent")
 
