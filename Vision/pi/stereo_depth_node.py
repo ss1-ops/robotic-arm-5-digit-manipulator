@@ -160,6 +160,18 @@ class StereoDepthNode(Node):
         M = cv2.moments(c)
         return (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])), mask
 
+    def _sample_xyz_mask(self, pts3d, valid, mask):
+        """Median 3D point (mm) over valid-depth pixels inside the colour blob.
+        Robust for solid objects whose interior has no stereo disparity."""
+        m = valid & (mask > 0)
+        if int(m.sum()) < 10:
+            return None
+        pts = pts3d[m]                                  # N x 3 (mm)
+        pts = pts[(pts[:, 2] > 0) & np.isfinite(pts[:, 2])]
+        if len(pts) < 10:
+            return None
+        return np.median(pts, axis=0)                   # (x, y, z) mm
+
     def _sample_depth(self, pts3d, valid, u, v, win=4):
         h, w = valid.shape
         y0, y1 = max(0, v - win), min(h, v + win + 1)
@@ -206,6 +218,15 @@ class StereoDepthNode(Node):
         if target is not None:
             u, v = target
             z_mm = self._sample_depth(pts3d, valid, u, v)
+            xyz_mm = None
+            if z_mm is None and mask is not None:
+                # Uniform/glossy blob -> no disparity at its centre. Fall back to
+                # the median 3D point over valid pixels in the WHOLE colour blob
+                # (its textured edges carry depth). Fixes BEARING_ONLY on solid
+                # objects.
+                xyz_mm = self._sample_xyz_mask(pts3d, valid, mask)
+                if xyz_mm is not None:
+                    z_mm = float(xyz_mm[2])
             if z_mm is None:
                 state = "BEARING_ONLY"
             else:
@@ -218,8 +239,12 @@ class StereoDepthNode(Node):
                     ps = PointStamped()
                     ps.header = header
                     ps.header.frame_id = self.frame_id
-                    ps.point.x = float(pts3d[v, u, 0] / 1000.0)
-                    ps.point.y = float(pts3d[v, u, 1] / 1000.0)
+                    if xyz_mm is not None:
+                        ps.point.x = float(xyz_mm[0] / 1000.0)
+                        ps.point.y = float(xyz_mm[1] / 1000.0)
+                    else:
+                        ps.point.x = float(pts3d[v, u, 0] / 1000.0)
+                        ps.point.y = float(pts3d[v, u, 1] / 1000.0)
                     ps.point.z = dist_m
                     self.pub_pt.publish(ps)
 
