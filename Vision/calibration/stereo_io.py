@@ -12,13 +12,15 @@ import cv2
 import numpy as np
 
 
-def open_stereo_camera(index, width=2560, height=960, fps=60, fourcc="MJPG"):
+def open_stereo_camera(index, width=2560, height=960, fps=30, fourcc="MJPG"):
     """Open the ELP stereo device and request the side-by-side mode.
 
     `width` is the FULL combined width (both lenses). For the 960p mode that is
-    2560x960 (two 1280x960 frames). AVFoundation may silently ignore some of
-    these hints, so callers should always check the actual frame size returned
-    by read() rather than trusting the request.
+    2560x960 (two 1280x960 frames). AVFoundation silently ignores the size hints
+    on a cold open and may hand back a lower mode (e.g. 2560x720), which would
+    silently corrupt a calibration (intrinsics are pixel-specific). So we apply
+    the mode, read a frame to check the ACTUAL size, and re-apply up to a few
+    times until it sticks; raise if it never reaches the requested size.
     """
     cap = cv2.VideoCapture(index, cv2.CAP_AVFOUNDATION)
     if not cap.isOpened():
@@ -27,13 +29,23 @@ def open_stereo_camera(index, width=2560, height=960, fps=60, fourcc="MJPG"):
             "indices, and make sure your terminal app has Camera permission "
             "(System Settings > Privacy & Security > Camera)."
         )
-    if fourcc:
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-    if fps:
-        cap.set(cv2.CAP_PROP_FPS, fps)
-    return cap
+    actual = None
+    for _ in range(6):
+        if fourcc:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        if fps:
+            cap.set(cv2.CAP_PROP_FPS, fps)
+        ok, fr = cap.read()  # forces the mode to apply
+        if ok and fr is not None:
+            actual = (fr.shape[1], fr.shape[0])
+            if actual == (width, height):
+                return cap
+    cap.release()
+    raise RuntimeError(
+        f"camera settled on {actual}, not the requested {width}x{height}. "
+        "A calibration at the wrong size will not match the Pi runtime.")
 
 
 def split_lr(frame):
