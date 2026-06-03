@@ -49,7 +49,8 @@ JOINTS = [
 
 SLIDER_SCALE   = 100   # slider integer units per radian
 PUBLISHER_PORT = 9000  # TCP port on the Pi where moveo_publisher.py listens
-CAMERA_URL     = "http://armpi.local:8080/"  # MJPEG stream from the Pi camera
+PI_HOST        = "192.168.1.142"  # Pi IP (mDNS 'armpi.local' resolution is flaky; use IP)
+CAMERA_URL     = f"http://{PI_HOST}:8080/"  # MJPEG stream from the Pi camera
 
 
 # ── Worker ─────────────────────────────────────────────────────────────────────
@@ -58,7 +59,7 @@ class Worker(QObject):
     status        = pyqtSignal(str)   # "connected" | "disconnected" | error text
     angles_update = pyqtSignal(list)  # emitted after a cartesian IK response with solved angles
 
-    HOST = "armpi.local"
+    HOST = PI_HOST
     USER = "armpi"
 
     # Individual startup commands — run sequentially in connect() via _ssh_step()
@@ -610,9 +611,13 @@ class MainWindow(QMainWindow):
                f"{lo[0]} {lo[1]} {lo[2]} {hi[0]} {hi[1]} {hi[2]} 0.22")
 
         def _go():
+            # Move to the viewing pose FIRST so it's the publisher's last command;
+            # the publisher re-publishes it at 2 Hz, so the approach node picks it
+            # up as q0 as soon as it subscribes. Do NOT send again after launch —
+            # that would fight the Jacobian probe once the servo starts moving.
+            self._worker.send_angles(angles)
+            time.sleep(0.5)
             self._worker._exec(cmd, timeout=15)
-            time.sleep(2.5)                     # let depth + approach nodes come up
-            self._worker.send_angles(angles)    # seed /joint_commands so the servo starts
         threading.Thread(target=_go, daemon=True).start()
 
     def _sample_hsv(self, x, y):

@@ -285,6 +285,26 @@ class JointPublisherNode(Node):
         # Protected by _joints_lock for thread safety.
         self._last_joints = [0.0] * 5
         self._joints_lock = threading.Lock()
+        # Re-publish the last command at a low rate. /joint_commands is VOLATILE
+        # (not latched), so a subscriber that comes up AFTER a command (e.g. the
+        # approach servo, launched on a GUI click) would otherwise wait forever
+        # for the next send. Re-publishing lets it pick up the current pose as
+        # soon as it's subscribed. During a servo it just echoes the latest jog
+        # command (no conflict). Gated until the first real command so we don't
+        # drive the arm to home on startup.
+        self._has_command = False
+        self.create_timer(0.5, self._republish)
+
+    def _republish(self):
+        if not self._has_command:
+            return
+        with self._joints_lock:
+            angles = list(self._last_joints)
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.name = JOINT_NAMES
+        msg.position = angles
+        self._pub.publish(msg)
 
     def publish(self, angles: list):
         msg = JointState()
@@ -294,6 +314,7 @@ class JointPublisherNode(Node):
         self._pub.publish(msg)
         with self._joints_lock:
             self._last_joints = list(msg.position)
+        self._has_command = True
         self.get_logger().info(f"published {[f'{a:.3f}' for a in angles]}")
 
     def publish_home(self):
