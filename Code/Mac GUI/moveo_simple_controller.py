@@ -629,7 +629,38 @@ class MainWindow(QMainWindow):
         self._cam_label.setPixmap(pm)
 
     # ── Click-to-go visual approach ─────────────────────────────────────────────
+    # TEST MODE: clicking the image jogs the arm a small amount to centre that
+    # pixel — for verifying the j1 (yaw) / j5 (pitch) direction matches the image.
+    # Flip JOG_SIGN_J1 / J5 below if the arm moves the wrong way. To restore the
+    # full go-to, point this at self._start_goto_object instead.
+    JOG_SIGN_J1 = -1.0   # +dx (click right) -> -j1 (yaw camera right) by default
+    JOG_SIGN_J5 = +1.0   # +dy (click below center) -> +j5
+    JOG_MAX_J1  = 0.15   # rad at a full-edge horizontal click
+    JOG_MAX_J5  = 0.15   # rad at a full-edge vertical click
+
+    def _jog_to_click(self, x, y):     # rename to _on_camera_click to use the jog test
+        if not self._worker.connected:
+            self._append_log("[jog] connect SSH first"); return
+        if self._estop:
+            self._append_log("[jog] release E-STOP first"); return
+        pm = self._cam_label.pixmap()
+        if pm is None or pm.isNull() or pm.width() <= 0 or pm.height() <= 0:
+            self._append_log("[jog] no camera image"); return
+        w, h = pm.width(), pm.height()
+        dx = (x - w / 2.0) / (w / 2.0)        # -1 (left edge) .. +1 (right edge)
+        dy = (y - h / 2.0) / (h / 2.0)        # -1 (top)       .. +1 (bottom)
+        dj1 = self.JOG_SIGN_J1 * self.JOG_MAX_J1 * dx
+        dj5 = self.JOG_SIGN_J5 * self.JOG_MAX_J5 * dy
+        angles = [self._sliders[i].value() / SLIDER_SCALE for i in range(len(JOINTS))]
+        angles[0] += dj1                      # j1 yaw  (horizontal)
+        angles[4] += dj5                      # j5 pitch (vertical)
+        self._append_log(f"[jog] click ({x},{y}) dx={dx:+.2f} dy={dy:+.2f} -> "
+                         f"dj1={dj1:+.3f} dj5={dj5:+.3f}")
+        self._on_ik_angles(angles)            # sync sliders/textboxes to the new pose
+        threading.Thread(target=lambda: self._worker.send_angles(angles), daemon=True).start()
+
     def _on_camera_click(self, x, y):
+        """Full click-to-go: center (fresh-frame servo) + camera-mount cartesian."""
         if not self._worker.connected:
             self._append_log("[approach] connect SSH first"); return
         if self._estop:
@@ -643,14 +674,10 @@ class MainWindow(QMainWindow):
                f"{lo[0]} {lo[1]} {lo[2]} {hi[0]} {hi[1]} {hi[2]} 0.22")
 
         def _go():
-            # Move to the viewing pose FIRST so it's the publisher's last command;
-            # the publisher re-publishes it at 2 Hz, so the approach node picks it
-            # up as q0 as soon as it subscribes. Do NOT send again after launch —
-            # that would fight the Jacobian probe once the servo starts moving.
             self._worker.send_angles(angles)
             time.sleep(0.5)
             self._worker._exec(cmd, timeout=15)
-            self._worker.stream_approach_log()   # mirror goto_object's steps into the GUI log
+            self._worker.stream_approach_log()
         threading.Thread(target=_go, daemon=True).start()
 
     def _sample_hsv(self, x, y):

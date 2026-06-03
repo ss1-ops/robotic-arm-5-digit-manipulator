@@ -29,6 +29,8 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import (QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy)
+from rclpy.time import Time
+from rclpy.duration import Duration
 from geometry_msgs.msg import PointStamped
 from std_msgs.msg import String, Empty
 from sensor_msgs.msg import JointState
@@ -66,6 +68,8 @@ class GotoObject(Node):
         self.port = p("port", 9000).value
 
         self._pt = None; self._state = "NONE"; self._q = None; self._abort = False
+        self._pt_stamp = None       # capture time of the latest /stereo/target/point
+        self._cmd_time = None       # ROS time the last joint command was sent
         self._lock = threading.Lock()
         self.create_subscription(PointStamped, "/stereo/target/point", self._ptcb, 10)
         self.create_subscription(String, "/stereo/target/state",
@@ -100,6 +104,7 @@ class GotoObject(Node):
             return
         with self._lock:
             self._pt = np.array([x, y, z])
+            self._pt_stamp = Time.from_msg(m.header.stamp)
 
     def _jc(self, m):
         if len(m.position) >= 5:
@@ -114,6 +119,8 @@ class GotoObject(Node):
         self._sock.sendall((json.dumps({"position": [round(float(a), 5) for a in q]}) + "\n").encode())
         try: self._sf.readline()
         except Exception: pass
+        with self._lock:
+            self._cmd_time = self.get_clock().now()   # mark when this move was issued
         return q
 
     def _send_cartesian(self, xyz_user):
@@ -124,19 +131,29 @@ class GotoObject(Node):
             return {}
 
     def _measure(self):
-        """Settle, then return the MEDIAN of several TRACK points (rejects single
-        noisy depth frames that would otherwise throw the centering servo off)."""
-        time.sleep(self.settle)
+        """Return the MEDIAN of N TRACK frames captured AFTER the last commanded
+        move has had time to execute. Frames are gated by capture timestamp
+        (stamp > cmd_time + settle), so the servo never acts on a stale frame
+        taken before/while the arm was still moving. Collects N DISTINCT frames."""
+        with self._lock:
+            cmd_t = self._cmd_time
+        deadline = (cmd_t + Duration(seconds=float(self.settle))) if cmd_t is not None else None
         samples = []
-        for _ in range(60):
+        last_stamp = None
+        t0 = time.time()
+        while time.time() - t0 < float(self.settle) + 8.0:
             with self._lock:
-                t = None if self._pt is None else self._pt.copy()
+                pt = None if self._pt is None else self._pt.copy()
+                stamp = self._pt_stamp
                 s = self._state
-            if t is not None and s == "TRACK":
-                samples.append(t)
-                if len(samples) >= self.n_samples:
-                    break
-            time.sleep(0.05)
+            if pt is not None and s == "TRACK" and stamp is not None:
+                fresh = (deadline is None) or (stamp > deadline)        # after the move settled
+                newer = (last_stamp is None) or (stamp > last_stamp)    # a distinct frame
+                if fresh and newer:
+                    samples.append(pt); last_stamp = stamp
+                    if len(samples) >= self.n_samples:
+                        break
+            time.sleep(0.03)
         if len(samples) < max(1, self.n_samples // 2):
             return None
         return np.median(np.array(samples), axis=0)
@@ -154,6 +171,8 @@ class GotoObject(Node):
             time.sleep(0.1)
         if q is None:
             self.get_logger().error("ERROR: no /joint_commands after 300s."); self._fin(); return
+        with self._lock:
+            self._cmd_time = self.get_clock().now()   # treat the viewing pose as a fresh move
         f0 = self._measure()
         if f0 is None:
             self.get_logger().error("ERROR: no target detected — check color/HSV and that the object is in view.")
