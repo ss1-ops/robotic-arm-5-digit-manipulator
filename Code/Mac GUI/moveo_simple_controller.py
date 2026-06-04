@@ -705,8 +705,12 @@ class MainWindow(QMainWindow):
         if hh < 0 or ss < 40:
             return None, None                   # achromatic — not color-trackable
         hcv = hh // 2                           # OpenCV hue 0-179
-        dh, ds, dv = 12, 90, 90
-        lo = [max(0, hcv - dh), max(0, ss - ds), max(0, vv - dv)]
+        # dh=18: wider than the 12 we used before to account for JPEG compression
+        # and the rectification/resize pipeline shifting colors in the depth node.
+        # Red/magenta wraps at 0/179 in OpenCV hue; clamp both ends rather than
+        # letting the range go negative or overflow — the depth node handles wrap.
+        dh, ds, dv = 18, 80, 80
+        lo = [max(0,   hcv - dh), max(20,  ss - ds), max(20,  vv - dv)]
         hi = [min(179, hcv + dh), min(255, ss + ds), min(255, vv + dv)]
         return lo, hi
 
