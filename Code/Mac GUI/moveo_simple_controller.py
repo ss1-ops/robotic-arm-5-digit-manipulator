@@ -64,13 +64,17 @@ class Worker(QObject):
 
     # Individual startup commands — run sequentially in connect() via _ssh_step()
     _CMD_KILL = (
-        # Use process NAME match (no -f) for micro_ros_agent so pkill doesn't
-        # accidentally match and kill the bash shell running this very command.
-        # For moveo_publisher (python3 process), match the .py filename which
-        # won't appear in our bash command's argv.
+        # Kill ALL vision/arm processes so each Connect starts exactly one of each.
+        # Without this, repeated Connect clicks stack duplicate nodes (2× camera
+        # fighting /dev/video0 -> load spikes, 2.3 fps, depth node starved).
         "pkill -9 micro_ros_agent 2>/dev/null; "
         "pkill -9 -f 'moveo_publisher\\.py' 2>/dev/null; "
-        "sleep 1; "
+        "pkill -9 -f 'stereo_camera_node\\.py' 2>/dev/null; "
+        "pkill -9 -f 'stereo_depth_node\\.py' 2>/dev/null; "
+        "pkill -9 -f 'mjpeg_stream\\.py' 2>/dev/null; "
+        "pkill -9 -f 'goto_object\\.py' 2>/dev/null; "
+        "pkill -9 -f 'approach_object\\.py' 2>/dev/null; "
+        "sleep 2; "
         "rm -f /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_* 2>/dev/null; "
         'echo "[startup] old processes cleared"'
     )
