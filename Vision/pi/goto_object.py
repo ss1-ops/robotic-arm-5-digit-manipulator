@@ -64,6 +64,8 @@ class GotoObject(Node):
         self.max_center = p("max_center_iters", 12).value
         self.n_samples = p("measure_samples", 5).value   # median over N frames (noise reject)
         self.max_reach = p("max_reach_m", 0.42).value    # clamp far targets to this (from J1 axis)
+        self.approach_step = p("approach_step_m", 0.06).value   # forward step per approach iteration
+        self.max_approach = p("max_approach_steps", 12).value
         self.host = p("host", "127.0.0.1").value
         self.port = p("port", 9000).value
 
@@ -158,6 +160,64 @@ class GotoObject(Node):
             return None
         return np.median(np.array(samples), axis=0)
 
+    # ── centering helper (reused at each approach step) ──
+    def _center(self, q, label="center"):
+        """Run j1/j5 IBVS to put the object on the optical axis.
+        Returns (q, f) — updated joint vector and the final measured point.
+        Returns (q, None) if the target is lost."""
+        ctrl = [0, 4]
+        f0 = self._measure()
+        if f0 is None:
+            return q, None
+        self.get_logger().info(
+            f"[{label}] start x={f0[0]*100:+.1f} y={f0[1]*100:+.1f} cm  depth={f0[2]*100:.0f}cm")
+
+        # 2×2 Jacobian probe (j1, j5)
+        J = np.zeros((2, 2))
+        for k, ji in enumerate(ctrl):
+            qp = q.copy(); qp[ji] += self.jog
+            self._send_joints(qp); fp = self._measure()
+            self._send_joints(q); self._measure()
+            if fp is None:
+                self.get_logger().error(
+                    f"[{label}] ERROR: lost target during j{ji+1} probe — "
+                    "use a bigger/brighter object, more centered.")
+                return q, None
+            J[:, k] = (fp[:2] - f0[:2]) / self.jog
+
+        f_prev = dq_prev = None
+        for it in range(self.max_center):
+            if self._abort:
+                return q, None
+            f = self._measure()
+            if f is None:
+                self.get_logger().warn(f"[{label}:{it}] target lost — holding."); continue
+            if f_prev is not None and dq_prev is not None:
+                den = float(dq_prev @ dq_prev)
+                if den > 1e-6:
+                    J = J + np.outer((f[:2] - f_prev[:2]) - J @ dq_prev, dq_prev) / den
+            e = f[:2]
+            self.get_logger().info(
+                f"[{label}:{it}] offset x={f[0]*100:+.1f} y={f[1]*100:+.1f} cm")
+            if np.linalg.norm(e) < self.center_tol:
+                break
+            Jpinv = J.T @ np.linalg.inv(J @ J.T + 0.02 * np.eye(2))
+            dq = -self.gain * (Jpinv @ e)
+            n = np.linalg.norm(dq)
+            if n > self.jog * 2:
+                dq *= self.jog * 2 / n
+            qn = q.copy()
+            for k, ji in enumerate(ctrl):
+                qn[ji] += dq[k]
+            q = self._send_joints(qn)
+            f_prev, dq_prev = f.copy(), dq.copy()
+        else:
+            self.get_logger().warn(
+                f"[{label}] could not fully center in {self.max_center} steps — proceeding.")
+
+        f = self._measure()
+        return q, f
+
     # ── main sequence ──
     def _run(self):
         self.get_logger().info("waiting for /joint_commands — click 'Send All Joints'...")
@@ -172,112 +232,88 @@ class GotoObject(Node):
         if q is None:
             self.get_logger().error("ERROR: no /joint_commands after 300s."); self._fin(); return
         with self._lock:
-            self._cmd_time = self.get_clock().now()   # treat the viewing pose as a fresh move
-        f0 = self._measure()
-        if f0 is None:
-            self.get_logger().error("ERROR: no target detected — check color/HSV and that the object is in view.")
-            self._fin(); return
+            self._cmd_time = self.get_clock().now()
 
-        # ── Phase 1: center on j1 (yaw) + j5 (pitch) ──
-        ctrl = [0, 4]
-        self.get_logger().info(f"centering (start x={f0[0]*100:.1f} y={f0[1]*100:.1f} depth={f0[2]*100:.0f}cm)...")
-        # 2x2 Jacobian d(x,y)/d(j1,j5) by a small one-sided probe (only j1/j5 move).
-        J = np.zeros((2, 2))
-        for k, ji in enumerate(ctrl):
-            qp = q.copy(); qp[ji] += self.jog
-            self._send_joints(qp); fp = self._measure()
-            self._send_joints(q); self._measure()
-            if fp is None:
-                self.get_logger().error("ERROR: cannot center target — lost it during the j%d probe. "
-                                        "Use a bigger/brighter object, more centered." % (ji + 1))
-                self._fin(); return
-            J[:, k] = (fp[:2] - f0[:2]) / self.jog
-        f_prev = dq_prev = None
-        centered = False
-        for it in range(self.max_center):
-            if self._abort:
-                self.get_logger().warn("ABORT."); self._fin(); return
-            f = self._measure()
-            if f is None:
-                self.get_logger().warn(f"centering [{it}]: target lost — holding."); continue
-            if f_prev is not None and dq_prev is not None:
-                den = float(dq_prev @ dq_prev)
-                if den > 1e-6:
-                    J = J + np.outer((f[:2] - f_prev[:2]) - J @ dq_prev, dq_prev) / den
-            e = f[:2]
-            self.get_logger().info(f"centering [{it}]: offset x={f[0]*100:+.1f} y={f[1]*100:+.1f} cm")
-            if np.linalg.norm(e) < self.center_tol:
-                centered = True; break
-            Jpinv = J.T @ np.linalg.inv(J @ J.T + 0.02 * np.eye(2))
-            dq = -self.gain * (Jpinv @ e)
-            n = np.linalg.norm(dq)
-            if n > self.jog * 2:
-                dq *= self.jog * 2 / n
-            qn = q.copy()
-            for k, ji in enumerate(ctrl):
-                qn[ji] += dq[k]
-            q = self._send_joints(qn)
-            f_prev, dq_prev = f.copy(), dq.copy()
-        if not centered:
-            self.get_logger().error("ERROR: could not center target within "
-                                    f"{self.max_center} steps — proceeding with best bearing.")
+        # ── Phase 1: initial centering ──
+        q, f = self._center(q, label="center")
+        if f is None:
+            self.get_logger().error("ERROR: cannot see target."); self._fin(); return
         with self._lock:
             qc = self._q.copy()
         self.get_logger().info(f"centered: j = {[round(float(a), 3) for a in qc]}")
 
-        # ── Phase 2: read depth, compute the object's Cartesian position ──
-        f = self._measure()
-        if f is None:
-            self.get_logger().error("ERROR: lost target before depth read."); self._fin(); return
+        # ── Phase 2: compute object's Cartesian position ──
         d = float(f[2])
         self.get_logger().info(f"depth from camera: {d*100:.1f} cm")
         with self._lock:
             qcur = self._q.copy()
-        T = fk_base_ee(qcur)                                  # base<-EE (internal frame)
-        obj_ee = CAM_T + np.array([f[0], f[1], d])            # object in EE frame
+        T = fk_base_ee(qcur)
+        obj_ee = CAM_T + np.array([f[0], f[1], d])
         obj_base = (T @ np.append(obj_ee, 1.0))[:3]
         obj_user = to_user(obj_base)
-        tgt_ee = CAM_T + np.array([f[0], f[1], max(0.05, d - self.standoff)])
-        tgt_base = (T @ np.append(tgt_ee, 1.0))[:3]
-        # Clamp to the arm's reach (measured from the J1 axis at z=L_BASE=0.17).
-        # If the object is too far, approach toward it to the limit rather than
-        # failing the IK outright.
-        ref = np.array([0.0, 0.0, 0.17])
-        vec = tgt_base - ref; dist = float(np.linalg.norm(vec))
-        if dist > self.max_reach:
-            tgt_base = ref + vec * (self.max_reach / dist)
-            self.get_logger().warn(
-                f"object is beyond reach ({dist*100:.0f}cm from base, max {self.max_reach*100:.0f}cm)"
-                f" — approaching to the reach limit; move it closer to actually grasp.")
-        tgt_user = to_user(tgt_base)
         self.get_logger().info(
             f"estimated location of target (base): "
             f"[{obj_user[0]:.3f}, {obj_user[1]:.3f}, {obj_user[2]:.3f}] m")
-        self.get_logger().info(
-            f"approaching to standoff {self.standoff*100:.0f}cm -> target "
-            f"[{tgt_user[0]:.3f}, {tgt_user[1]:.3f}, {tgt_user[2]:.3f}] m")
 
-        # ── Phase 3: Cartesian move to the standoff ──
-        if self._abort:
-            self.get_logger().warn("ABORT before move."); self._fin(); return
-        ack = self._send_cartesian(tgt_user)
-        if not ack.get("ok"):
-            self.get_logger().error(f"ERROR: IK/move rejected: {ack.get('error', ack)}"); self._fin(); return
-        ang = ack.get("angles", [])
-        self.get_logger().info(f"[IK] {[f'{a:.3f}' for a in tgt_user]}  ->  err {ack.get('fk_err_mm','?')}mm")
-        self.get_logger().info(f"[tx] {[round(float(a), 3) for a in ang]}")
-        time.sleep(3.0)
+        # ── Phase 3: incremental approach — step forward, re-center, repeat ──
+        # Each step moves a fraction of the remaining distance toward the object,
+        # then re-centers j1/j5 so the camera stays aimed at the object throughout.
+        for step in range(self.max_approach):
+            if self._abort:
+                self.get_logger().warn("ABORT."); self._fin(); return
+            with self._lock:
+                qcur = self._q.copy()
+            T = fk_base_ee(qcur)
+            f_now = self._measure()
+            if f_now is None:
+                self.get_logger().error(
+                    f"ERROR: lost target during approach step {step}."); self._fin(); return
+            d_now = float(f_now[2])
+            remaining = d_now - self.standoff
+            self.get_logger().info(
+                f"[approach:{step}] depth={d_now*100:.0f}cm  remaining={remaining*100:.0f}cm")
+            if remaining <= 0.01:
+                self.get_logger().info("standoff reached."); break
 
-        # ── Phase 4: verify / report residual ──
-        if self._abort:
-            self._fin(); return
+            # Step forward by approach_step (or the remaining distance if smaller)
+            step_d = min(self.approach_step, remaining)
+            tgt_ee = CAM_T + np.array([f_now[0], f_now[1], max(0.05, d_now - step_d)])
+            tgt_base = (T @ np.append(tgt_ee, 1.0))[:3]
+            ref = np.array([0.0, 0.0, 0.17])
+            vec = tgt_base - ref; dist_reach = float(np.linalg.norm(vec))
+            if dist_reach > self.max_reach:
+                tgt_base = ref + vec * (self.max_reach / dist_reach)
+                self.get_logger().warn(
+                    f"object beyond reach ({dist_reach*100:.0f}cm) — clamping to reach limit.")
+            tgt_user = to_user(tgt_base)
+            ack = self._send_cartesian(tgt_user)
+            if not ack.get("ok"):
+                self.get_logger().error(
+                    f"ERROR: IK rejected at step {step}: {ack.get('error', ack)}"); self._fin(); return
+            ang = ack.get("angles", [])
+            self.get_logger().info(
+                f"[IK] {[f'{a:.3f}' for a in tgt_user]}  err {ack.get('fk_err_mm','?')}mm")
+            self.get_logger().info(f"[tx] {[round(float(a), 3) for a in ang]}")
+            with self._lock:
+                q = self._q.copy() if self._q is not None else q
+            time.sleep(2.5)
+
+            # Re-center: adjust j1/j5 to keep the camera on the object
+            q, f_after = self._center(q, label=f"re-aim:{step}")
+            if f_after is None:
+                self.get_logger().error(
+                    f"ERROR: lost target after step {step} — stopping."); self._fin(); return
+        else:
+            self.get_logger().warn("max approach steps reached.")
+
+        # ── Phase 4: final verify ──
         f = self._measure()
         if f is None:
-            self.get_logger().warn("verify: object not re-acquired after the move (left view / occluded).")
+            self.get_logger().warn("verify: object not visible at standoff.")
             self._fin(); return
         self.get_logger().info(
-            f"verify (near object): offset x={f[0]*100:+.1f} y={f[1]*100:+.1f} cm, "
-            f"depth {f[2]*100:.1f}cm (wanted ~{self.standoff*100:.0f}cm). Re-click to refine.")
+            f"verify: offset x={f[0]*100:+.1f} y={f[1]*100:+.1f} cm, "
+            f"depth {f[2]*100:.1f}cm (target {self.standoff*100:.0f}cm). Re-click to refine.")
         self._fin()
 
     def _fin(self):
