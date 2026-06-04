@@ -109,30 +109,34 @@ class GotoObject(Node):
 
     # ── calibration ──
     def _load_cal(self, path):
+        """Load stereo calibration and compute rectification maps at half resolution.
+        Uses the same approach as stereo_depth_node: scale K, then call stereoRectify
+        at the scaled size so OpenCV produces a correctly-scaled Q matrix."""
         fs = cv2.FileStorage(path, cv2.FILE_STORAGE_READ)
-        def m(k): n = fs.getNode(k); return None if n.empty() else n.mat()
-        K1,D1,K2,D2 = m("K1"),m("D1"),m("D2"),m("D2")
-        K2,D2 = m("K2"),m("D2")
-        R1,P1,R2,P2,Q = m("R1"),m("P1"),m("R2"),m("P2"),m("Q")
+        if not fs.isOpened():
+            raise RuntimeError(f"cannot open calibration: {path}")
+        g = lambda n: fs.getNode(n).mat()
+        K1, D1, K2, D2 = g("K1"), g("D1"), g("K2"), g("D2")
+        R, T = g("R"), g("T")
         iw = int(fs.getNode("image_width").real())
         ih = int(fs.getNode("image_height").real())
         fs.release()
-        sw, sh = 640, 480   # depth node proc size
-        sx, sy = sw/iw, sh/ih
-        def scale_K(K):
-            Ks = K.copy(); Ks[0,:] *= sx; Ks[1,:] *= sy; return Ks
-        sK1 = scale_K(K1); sK2 = scale_K(K2)
-        sP1 = scale_K(P1); sP2 = scale_K(P2)
-        sQ = Q.copy(); sQ[2,3] *= (sx+sy)/2; sQ[3,2] /= (sx+sy)/2
-        mapL = cv2.initUndistortRectifyMap(sK1, D1.ravel(), R1, sP1, (sw,sh), cv2.CV_16SC2)
-        mapR = cv2.initUndistortRectifyMap(sK2, D2.ravel(), R2, sP2, (sw,sh), cv2.CV_16SC2)
-        # Also keep full-res K1 for pixel->normalised conversion
+        scale = 0.5   # half-res for SGBM (same as depth node default)
+        sw, sh = int(round(iw*scale)), int(round(ih*scale))
+        S = np.array([[scale,0,0],[0,scale,0],[0,0,1]], np.float64)
+        K1s, K2s = S @ K1, S @ K2
+        R1, R2, P1, P2, Q, _, _ = cv2.stereoRectify(
+            K1s, D1, K2s, D2, (sw,sh), R, T,
+            flags=cv2.CALIB_ZERO_DISPARITY, alpha=0)
+        mapL = cv2.initUndistortRectifyMap(K1s, D1, R1, P1, (sw,sh), cv2.CV_16SC2)
+        mapR = cv2.initUndistortRectifyMap(K2s, D2, R2, P2, (sw,sh), cv2.CV_16SC2)
         sgbm = cv2.StereoSGBM_create(
             minDisparity=0, numDisparities=64, blockSize=7,
             P1=8*3*49, P2=32*3*49, disp12MaxDiff=1,
             uniquenessRatio=10, speckleWindowSize=100, speckleRange=32,
             mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY)
-        return {"mapL": mapL, "mapR": mapR, "Q": sQ,
+        # Keep full-res K1 for raw-pixel -> normalised-ray conversion
+        return {"mapL": mapL, "mapR": mapR, "Q": Q,
                 "sgbm": sgbm, "sw": sw, "sh": sh,
                 "fx": float(K1[0,0]), "fy": float(K1[1,1]),
                 "cx": float(K1[0,2]), "cy": float(K1[1,2])}
@@ -372,7 +376,12 @@ class GotoObject(Node):
         obj_user = to_user(obj_base)
         self.get_logger().info(
             f"estimated location of target (base): "
-            f"[{obj_user[0]:.3f}, {obj_user[1]:.3f}, {obj_user[2]:.3f}] m")
+            f"[{obj_user[0]:.3f}, {obj_user[1]:.3f}, {obj_user[2]:.3f}] m  "
+            f"(tan(j1)={np.tan(qcur[0]):.3f}  y/x={obj_user[1]/obj_user[0]:.3f})"
+            if abs(obj_user[0]) > 0.01 else
+            f"estimated location of target (base): "
+            f"[{obj_user[0]:.3f}, {obj_user[1]:.3f}, {obj_user[2]:.3f}] m"
+        )
 
         tgt_ee   = CAM_T + np.array([x_n*z_m, y_n*z_m, max(0.05, z_m - self.standoff)])
         tgt_base = (T @ np.append(tgt_ee, 1.0))[:3]
