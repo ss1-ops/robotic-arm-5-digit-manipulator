@@ -400,12 +400,20 @@ class GotoObject(Node):
             ik_angles, fk_err = mp.solve_ik(tgt_user, qcur.tolist())
         except Exception as e:
             self.get_logger().error(f"ERROR: IK failed: {e}"); self._fin(); return
-        self.get_logger().info(f"[IK] err {fk_err:.1f}mm")
+        self.get_logger().info(
+            f"[IK] j = {[round(float(a),3) for a in ik_angles]}  err {fk_err:.1f}mm")
 
+        # Force j4=0: j4 is a roll joint and its scale is uncalibrated.
+        # The IK is free to pick any j4, but executing a non-zero j4 produces
+        # position errors because the firmware's scale factor is wrong.
+        ik_angles = list(ik_angles); ik_angles[3] = 0.0
+
+        # Compute j5 that aims the camera at the object at the new pose.
         ik_aimed = self._aim_j5(ik_angles, obj_base)
         delta_j5 = float(ik_aimed[4]) - float(ik_angles[4])
         self.get_logger().info(
-            f"j5 aim: {delta_j5:+.3f} rad ({np.degrees(delta_j5):+.1f}°)")
+            f"j5 aim: {delta_j5:+.3f} rad ({np.degrees(delta_j5):+.1f}°)  "
+            f"j4 forced 0 (was {ik_angles[3]:.3f})")
         self.get_logger().info(f"[tx] {[round(float(a),3) for a in ik_aimed]}")
 
         if self._abort: self.get_logger().warn("ABORT."); self._fin(); return
