@@ -151,11 +151,11 @@ class Worker(QObject):
             self._transport = c.get_transport()
             self.log.emit("[SSH] connected — running startup script…")
 
-            self._ssh_step("kill",      self._CMD_KILL,      timeout=8)
+            self._ssh_step("kill",      self._CMD_KILL,      timeout=12)
             self._ssh_step("agent",     self._CMD_AGENT,     timeout=20)
             self._ssh_step("esp32",     self._CMD_ESP32,     timeout=12)
             self._ssh_step("publisher", self._CMD_PUBLISHER, timeout=20)
-            self._ssh_step("vision",    self._CMD_VISION,    timeout=20)
+            self._ssh_step("vision",    self._CMD_VISION,    timeout=35)
 
             self._open_channel()
             self.connected = True
