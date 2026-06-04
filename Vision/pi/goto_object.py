@@ -403,17 +403,25 @@ class GotoObject(Node):
         self.get_logger().info(
             f"[IK] j = {[round(float(a),3) for a in ik_angles]}  err {fk_err:.1f}mm")
 
-        # Force j4=0: j4 is a roll joint and its scale is uncalibrated.
-        # The IK is free to pick any j4, but executing a non-zero j4 produces
-        # position errors because the firmware's scale factor is wrong.
-        ik_angles = list(ik_angles); ik_angles[3] = 0.0
+        # Constrain IK to stay in the same arm configuration as the viewing pose:
+        # j1: centering already put it at the right horizontal aim — keep it.
+        # j2: shoulder was at 0 during viewing; IK can jump it wildly (e.g. 0->1.676),
+        #     causing massive j5 corrections and unpredictable motion — pin it.
+        # j4: roll joint with uncalibrated scale — always 0.
+        # Only j3 (depth / reach) changes, which is what we actually want.
+        ik_angles = list(ik_angles)
+        ik_angles[0] = float(qcur[0])   # j1 from centering
+        ik_angles[1] = float(qcur[1])   # j2 from viewing pose (usually 0)
+        ik_angles[3] = 0.0              # j4 forced 0 (uncalibrated)
+        self.get_logger().info(
+            f"constrained: j1={ik_angles[0]:.3f} j2={ik_angles[1]:.3f} "
+            f"j3={ik_angles[2]:.3f} j4=0 (IK free j3 used for depth)")
 
-        # Compute j5 that aims the camera at the object at the new pose.
+        # Compute j5 so the camera aims at the object at this constrained pose.
         ik_aimed = self._aim_j5(ik_angles, obj_base)
         delta_j5 = float(ik_aimed[4]) - float(ik_angles[4])
         self.get_logger().info(
-            f"j5 aim: {delta_j5:+.3f} rad ({np.degrees(delta_j5):+.1f}°)  "
-            f"j4 forced 0 (was {ik_angles[3]:.3f})")
+            f"j5 aim: {delta_j5:+.3f} rad ({np.degrees(delta_j5):+.1f}°)")
         self.get_logger().info(f"[tx] {[round(float(a),3) for a in ik_aimed]}")
 
         if self._abort: self.get_logger().warn("ABORT."); self._fin(); return
