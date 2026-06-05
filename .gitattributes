@@ -5,3 +5,24 @@
 *.3mf filter=lfs diff=lfs merge=lfs -text
 *.f3d filter=lfs diff=lfs merge=lfs -text
 *.zip filter=lfs diff=lfs merge=lfs -text
+
+# Additional binaries for cleanliness
+*.pdf binary
+*.mov binary
+*.mp4 binary
+*.bin binary
+*.kicad_pcb binary
+*.kicad_prl binary
+*.kicad_mod binary
+*.kicad_sym binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+
+# Language stats overrides
+*.ST linguist-language=Text
+*.ino linguist-language=C++
+*.ino linguist-detectable=true
+
+# Vendored reference material (original BCN3D)
+reference/** linguist-vendored
