@@ -1,0 +1,86 @@
+INFO: Header : Author::Unknown
+INFO: Header : Authorization::Unknown
+INFO: Header : Description::Unknown
+INFO: Header : File Name::XIAO-ESP32S3 v2.step
+INFO: Header : Implementation Level::2;1
+INFO: Header : Organization::Unknown
+INFO: Header : Originating System::Autodesk Translation Framework v12.4.0.73
+INFO: Header : Preprocessor Version::ST-DEVELOPER v19.2
+INFO: Header : Schema::AUTOMOTIVE_DESIGN { 1 0 10303 214 3 1 1 }
+INFO: Header : Time Stamp::2023-05-27T14:07:10+02:00
+INFO: Begin CAD File Read 'C:/Users/aidan/Documents/PCBs/Open Source PCB/COMPONENT IMPORTS/ESP32s3/XIAO-ESP32S3 v2.step'
+
+INFO:       Summary of STEP Entities
+INFO: 
+INFO: Entity Type                                                   Count
+INFO: -----------                                                   ------
+INFO: advanced_brep_shape_representation .......................:   29
+INFO: advanced_face ............................................:   864
+INFO: application_context ......................................:   1
+INFO: application_protocol_definition ..........................:   1
+INFO: axis2_placement_3d .......................................:   1380
+INFO: brep_with_voids ..........................................:   1
+INFO: b_spline_curve_with_knots ................................:   4
+INFO: b_spline_surface_with_knots ..............................:   2
+INFO: b_spline_surface_with_knots_and_rational_b_spline_surface :   1
+INFO: cartesian_point ..........................................:   4899
+INFO: circle ...................................................:   450
+INFO: closed_shell .............................................:   37
+INFO: colour_rgb ...............................................:   10
+INFO: conical_surface ..........................................:   9
+INFO: context_dependent_over_riding_styled_item ................:   1
+INFO: context_dependent_shape_representation ...................:   33
+INFO: cylindrical_surface ......................................:   209
+INFO: derived_unit .............................................:   28
+INFO: derived_unit_element .....................................:   56
+INFO: descriptive_representation_item ..........................:   28
+INFO: direction ................................................:   4513
+INFO: edge_curve ...............................................:   2209
+INFO: edge_loop ................................................:   942
+INFO: ellipse ..................................................:   2
+INFO: face_bound ...............................................:   78
+INFO: face_outer_bound .........................................:   864
+INFO: fill_area_style ..........................................:   10
+INFO: fill_area_style_colour ...................................:   10
+INFO: geometric_representation_context_and_global_uncertainty_a :   34
+INFO: item_defined_transformation ..............................:   33
+INFO: length_unit_and_si_unit ..................................:   2
+INFO: line .....................................................:   1753
+INFO: manifold_solid_brep ......................................:   31
+INFO: mapped_item ..............................................:   1
+INFO: mass_unit_and_si_unit ....................................:   1
+INFO: measure_representation_item ..............................:   28
+INFO: mechanical_design_geometric_presentation_representation ..:   1
+INFO: next_assembly_usage_occurrence ...........................:   33
+INFO: oriented_closed_shell ....................................:   5
+INFO: oriented_edge ............................................:   4418
+INFO: plane ....................................................:   625
+INFO: plane_angle_unit_and_si_unit .............................:   1
+INFO: presentation_style_assignment ............................:   11
+INFO: product ..................................................:   33
+INFO: product_context ..........................................:   1
+INFO: product_definition .......................................:   33
+INFO: product_definition_context ...............................:   1
+INFO: product_definition_formation .............................:   33
+INFO: product_definition_shape .................................:   66
+INFO: product_related_product_category .........................:   33
+INFO: property_definition ......................................:   56
+INFO: property_definition_representation .......................:   56
+INFO: representation ...........................................:   56
+INFO: representation_map .......................................:   1
+INFO: representation_relationship_with_transformation_and_shape :   33
+INFO: shape_definition_representation ..........................:   33
+INFO: shape_representation .....................................:   33
+INFO: shape_representation_relationship ........................:   29
+INFO: si_unit_and_solid_angle_unit .............................:   1
+INFO: spherical_surface ........................................:   6
+INFO: styled_item ..............................................:   303
+INFO: surface_side_style .......................................:   10
+INFO: surface_style_fill_area ..................................:   10
+INFO: surface_style_usage ......................................:   10
+INFO: toroidal_surface .........................................:   12
+INFO: uncertainty_measure_with_unit ............................:   34
+INFO: vector ...................................................:   1753
+INFO: vertex_point .............................................:   1431
+INFO:                                                              -------
+INFO: Total                                                         27715

@@ -1,0 +1,9 @@
+EESchema-DOCLIB  Version 2.0
+#
+$CMP XT30PW-M
+D 30A Low Temperature Rise Fire Retardant Plug
+K
+F https://www.tme.eu/sl/Document/ce4077e36b79046da520ca73227e15de/XT30PW%20SPEC.pdf
+$ENDCMP
+#
+#End Doc Library

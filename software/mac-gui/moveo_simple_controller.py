@@ -242,6 +242,9 @@ class Worker(QObject):
                         fk_mm = resp.get("fk_err_mm")
                         suffix = f" (err {fk_mm:.1f}mm)" if fk_mm is not None else ""
                         self.log.emit(f"[IK] joints: {degs}{suffix}")
+                        if "achieved" in resp:
+                            ach = resp["achieved"]
+                            self.log.emit(f"[IK] achieved (solver model) x={ach[0]:.3f} y={ach[1]:.3f} z={ach[2]:.3f} m")
                     else:
                         self.log.emit("[ack] ok")
                 else:
@@ -493,6 +496,18 @@ class MainWindow(QMainWindow):
             self._set_btns.append(btn)
 
         vlay.addWidget(joints_box)
+
+        # F-007: FK calculation button (displays x,y,z of EE from current joints via FK)
+        # Placed near joints section as per spec. Pure sim/GUI, no hardware/SSH needed.
+        fk_box = QGroupBox("FK (EE from joints)")
+        fkh = QHBoxLayout(fk_box)
+        self._fk_btn = QPushButton("Compute FK")
+        self._fk_btn.clicked.connect(self._compute_fk)
+        self._fk_label = QLabel("x=0.000 y=0.000 z=0.000 m")
+        fkh.addWidget(self._fk_btn)
+        fkh.addWidget(self._fk_label)
+        fkh.addStretch()
+        vlay.addWidget(fk_box)
 
         # Speed control
         speed_box = QGroupBox("Speed")
@@ -845,6 +860,29 @@ class MainWindow(QMainWindow):
             self._sliders[i].blockSignals(False)
             self._textboxes[i].setText("0.000")
         self._dispatch([0.0] * 5, force=True)
+
+    def _compute_fk(self):
+        """F-007: Compute and display EE (x,y,z) via FK from current joints.
+        Uses the forward_kinematics helper from the single-source kinematics.py.
+        Returns coordinates in the same user frame as IK targets (+X forward, +Y left).
+        No hardware, no SSH, no regression to IK/send paths.
+        """
+        import sys
+        import os
+        # Ensure we can find the sibling kinematics.py (pure, no ROS/rclpy at all)
+        gui_dir = os.path.dirname(os.path.abspath(__file__))
+        if gui_dir not in sys.path:
+            sys.path.insert(0, gui_dir)
+        try:
+            from kinematics import forward_kinematics
+        except Exception:
+            self._fk_label.setText("FK unavailable (ikpy not installed — re-run the Launch Simple Controller.command or bash software/mac-gui/install_dependencies.sh)")
+            return
+        try:
+            x, y, z = forward_kinematics(self._angles)
+            self._fk_label.setText(f"x={x:.3f} y={y:.3f} z={z:.3f} m")
+        except Exception as e:
+            self._fk_label.setText(f"FK error: {e}")
 
     def _set_as_home(self):
         """Declare current physical position as home — zeros ESP32 counters without moving."""

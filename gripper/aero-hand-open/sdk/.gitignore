@@ -1,0 +1,12 @@
+## Env files
+.venv
+
+## Cache files
+__pycache__
+*.egg-info
+
+## Test folders
+firmware
+esp32-hand-controller
+
+uvconfig.toml

@@ -1,7 +1,0 @@
-build
-cmake-build-*
-install
-log
-__pycache__
-.idea
-.vscode

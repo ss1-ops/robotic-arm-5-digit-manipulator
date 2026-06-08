@@ -1,153 +1,215 @@
-<?xml version="1.0"?>
-<!--
-  moveo.urdf — clean kinematic URDF for the BCN3D Moveo (5-DOF), matching the
-  ikpy MOVEO_CHAIN in moveo_publisher.py (single source of truth).
-
-  Replaces the CAD-exported moveo_clean.urdf, which had a spurious ~0.24 m base
-  Y-offset and messy CAD frame rotations. This model:
-    * stacks straight up +Z at home (all joints 0) — EE at (0, 0, 0.797)
-    * clean joint axes: J1 yaw (Z), J2/J3/J5 pitch (X), J4 wrist roll (Z)
-    * link lengths (m): base->J1 0.170 (measured); CAD joint-to-joint for the rest:
-        J1->J2 0.183, J2->J3 0.221, J3->J4 0.170, J4->J5 0.053, J5->tip 0.040
-  Simple cylinder visuals so it displays correctly in RViz.
--->
+<?xml version='1.0'?>
 <robot name="moveo">
 
-  <material name="grey">  <color rgba="0.6 0.6 0.6 1"/></material>
-  <material name="blue">  <color rgba="0.2 0.4 0.8 1"/></material>
-  <material name="orange"><color rgba="0.9 0.5 0.1 1"/></material>
-
-  <!-- base column: base plate up to the waist (J1) axis -->
+  <!-- Base Link -->
   <link name="base_link">
     <visual>
-      <origin xyz="0 0 0.085" rpy="0 0 0"/>
-      <geometry><cylinder radius="0.045" length="0.170"/></geometry>
-      <material name="grey"/>
+      <origin xyz="0 0 0.13" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://moveo_description/meshes/base_link.stl"/>
+      </geometry>
+      <material name="">
+        <color rgba="0.75294 0.75294 0.75294 1"/>
+      </material>
     </visual>
-    <inertial><mass value="1.0"/><inertia ixx="0.01" iyy="0.01" izz="0.01" ixy="0" ixz="0" iyz="0"/></inertial>
+    <collision>
+      <origin xyz="0 0 0.13" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://moveo_description/meshes/base_link_col.stl"/>
+      </geometry>
+    </collision>
   </link>
 
-  <joint name="Joint_1" type="revolute">    <!-- waist / yaw -->
-    <parent link="base_link"/><child link="Link_1"/>
-    <origin xyz="0 0 0.170" rpy="0 0 0"/>
-    <axis xyz="0 0 1"/>
-    <limit lower="-2.00" upper="2.40" effort="10" velocity="2"/>
-  </joint>
-
-  <link name="Link_1">                       <!-- waist -> shoulder -->
-    <visual>
-      <origin xyz="0 0 0.0915" rpy="0 0 0"/>
-      <geometry><cylinder radius="0.038" length="0.183"/></geometry>
-      <material name="blue"/>
-    </visual>
-    <inertial><mass value="0.8"/><inertia ixx="0.005" iyy="0.005" izz="0.005" ixy="0" ixz="0" iyz="0"/></inertial>
-  </link>
-
-  <joint name="Joint_2" type="revolute">    <!-- shoulder / pitch -->
-    <parent link="Link_1"/><child link="Link_2"/>
-    <origin xyz="0 0 0.183" rpy="0 0 0"/>
-    <axis xyz="1 0 0"/>
-    <limit lower="-1.95" upper="1.95" effort="10" velocity="2"/>
-  </joint>
-
-  <link name="Link_2">                       <!-- upper arm: shoulder -> elbow -->
-    <visual>
-      <origin xyz="0 0 0.1105" rpy="0 0 0"/>
-      <geometry><cylinder radius="0.032" length="0.221"/></geometry>
-      <material name="orange"/>
-    </visual>
-    <inertial><mass value="0.6"/><inertia ixx="0.004" iyy="0.004" izz="0.004" ixy="0" ixz="0" iyz="0"/></inertial>
-  </link>
-
-  <joint name="Joint_3" type="revolute">    <!-- elbow / pitch -->
-    <parent link="Link_2"/><child link="Link_3"/>
-    <origin xyz="0 0 0.221" rpy="0 0 0"/>
-    <axis xyz="1 0 0"/>
-    <limit lower="-2.20" upper="2.20" effort="10" velocity="2"/>
-  </joint>
-
-  <link name="Link_3">                       <!-- forearm: elbow -> wrist roll -->
-    <visual>
-      <origin xyz="0 0 0.085" rpy="0 0 0"/>
-      <geometry><cylinder radius="0.026" length="0.170"/></geometry>
-      <material name="blue"/>
-    </visual>
-    <inertial><mass value="0.4"/><inertia ixx="0.002" iyy="0.002" izz="0.002" ixy="0" ixz="0" iyz="0"/></inertial>
-  </link>
-
-  <joint name="Joint_4" type="revolute">    <!-- wrist roll (about forearm) -->
-    <parent link="Link_3"/><child link="Link_4"/>
-    <origin xyz="0 0 0.170" rpy="0 0 0"/>
-    <axis xyz="0 0 1"/>
-    <limit lower="-3.14" upper="3.14" effort="10" velocity="2"/>
-  </joint>
-
-  <link name="Link_4">                       <!-- wrist roll -> wrist pitch -->
-    <visual>
-      <origin xyz="0 0 0.0265" rpy="0 0 0"/>
-      <geometry><cylinder radius="0.024" length="0.053"/></geometry>
-      <material name="orange"/>
-    </visual>
-    <inertial><mass value="0.2"/><inertia ixx="0.001" iyy="0.001" izz="0.001" ixy="0" ixz="0" iyz="0"/></inertial>
-  </link>
-
-  <joint name="Joint_5" type="revolute">    <!-- wrist pitch -->
-    <parent link="Link_4"/><child link="Link_5"/>
-    <origin xyz="0 0 0.053" rpy="0 0 0"/>
-    <axis xyz="1 0 0"/>
-    <limit lower="-1.75" upper="1.75" effort="10" velocity="2"/>
-  </joint>
-
-  <link name="Link_5">                       <!-- wrist pitch -> tool tip -->
-    <visual>
-      <origin xyz="0 0 0.020" rpy="0 0 0"/>
-      <geometry><cylinder radius="0.020" length="0.040"/></geometry>
-      <material name="grey"/>
-    </visual>
-    <inertial><mass value="0.15"/><inertia ixx="0.0005" iyy="0.0005" izz="0.0005" ixy="0" ixz="0" iyz="0"/></inertial>
-  </link>
-
-  <joint name="Joint_ee" type="fixed">       <!-- tool / end-effector tip -->
-    <parent link="Link_5"/><child link="ee_link"/>
-    <origin xyz="0 0 0.040" rpy="0 0 0"/>
-  </joint>
-  <link name="ee_link"/>
-
-  <!-- ===== Eye-in-hand stereo camera mount (rigid to the EE) =====
-       From the Vision Mount + EE Adapter CAD, relative to the EE frame:
-       stereo midpoint 50 mm back (-X), cameras 60 mm apart along Y
-       (right +0.03, left -0.03). No Z offset specified -> taken at the EE frame.
-       These are the camera BODY centers. The *optical* frames (camera_*_optical)
-       carry the lens viewing direction for the cartesian go-to; their rpy is
-       PROVISIONAL until the optical-axis orientation is confirmed. -->
-  <joint name="camera_mount_joint" type="fixed">
-    <parent link="ee_link"/><child link="camera_mount"/>
-    <origin xyz="-0.05 0 0" rpy="0 0 0"/>
-  </joint>
-  <link name="camera_mount">
+  <link name="Link_1">
+    <inertial>
+      <origin xyz="0.00004019 0.09063400 0.00010221" rpy="0 0 0"/>
+      <mass value="4.2526"/>
+      <inertia ixx="0.0034071" ixy="8.9041e-06" ixz="1.179e-07"
+               iyy="0.018642" iyz="-3.6544e-06" izz="0.021987"/>
+    </inertial>
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><box size="0.018 0.080 0.018"/></geometry>
-      <material name="grey"/>
+      <geometry>
+        <mesh filename="package://moveo_description/meshes/Link_1.stl"/>
+      </geometry>
+      <material name="">
+        <color rgba="0.75294 0.75294 0.75294 1"/>
+      </material>
     </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://moveo_description/meshes/Link_1_col.stl"/>
+      </geometry>
+    </collision>
   </link>
-
-  <joint name="left_camera_joint" type="fixed">
-    <parent link="camera_mount"/><child link="left_camera"/>
-    <origin xyz="0 -0.03 0" rpy="0 0 0"/>
+  <joint name="Joint_1" type="revolute">
+    <origin xyz="0.00000000 -0.24250000 0.13000000" rpy="1.57079633 0.00000367 1.20579347"/>
+    <parent link="base_link"/>
+    <child link="Link_1"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.5707" upper="1.5707" effort="5" velocity="1"/>
   </joint>
-  <link name="left_camera">
-    <visual><origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><box size="0.015 0.015 0.015"/></geometry><material name="blue"/></visual>
-  </link>
 
-  <joint name="right_camera_joint" type="fixed">
-    <parent link="camera_mount"/><child link="right_camera"/>
-    <origin xyz="0 0.03 0" rpy="0 0 0"/>
-  </joint>
-  <link name="right_camera">
-    <visual><origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><box size="0.015 0.015 0.015"/></geometry><material name="orange"/></visual>
+  <link name="Link_2">
+    <inertial>
+      <origin xyz="0.00002282 0.00176160 -0.08000200" rpy="0 0 0"/>
+      <mass value="1.9323"/>
+      <inertia ixx="0.012138" ixy="-3.5576e-06" ixz="-9.0632e-06"
+               iyy="0.011445" iyz="0.00014273" izz="0.00070271"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://moveo_description/meshes/Link_2.stl"/>
+      </geometry>
+      <material name="">
+        <color rgba="0.75294 0.75294 0.75294 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://moveo_description/meshes/Link_2_col.stl"/>
+      </geometry>
+    </collision>
   </link>
+  <joint name="Joint_2" type="revolute">
+    <origin xyz="0.00000000 0.18264000 0.00000000" rpy="1.57078667 1.57079206 0.00000000"/>
+    <parent link="Link_1"/>
+    <child link="Link_2"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="-1.5707" upper="1.5707" effort="5" velocity="1"/>
+  </joint>
+
+  <link name="Link_3">
+    <inertial>
+      <origin xyz="0.05095000 -0.00039084 -0.00045591" rpy="0 0 0"/>
+      <mass value="1.1381"/>
+      <inertia ixx="0.00023572" ixy="-3.8425e-06" ixz="4.1286e-06"
+               iyy="0.00029123" iyz="-1.0387e-07" izz="0.00052457"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://moveo_description/meshes/Link_3.stl"/>
+      </geometry>
+      <material name="">
+        <color rgba="0.75294 0.75294 0.75294 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://moveo_description/meshes/Link_3_col.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Joint_3" type="revolute">
+    <origin xyz="0.00000000 0.00000000 -0.22112000" rpy="0.00000124 1.56835920 0.00000000"/>
+    <parent link="Link_2"/>
+    <child link="Link_3"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="-1.5707" upper="1.5707" effort="5" velocity="1"/>
+  </joint>
+
+  <link name="Link_4">
+    <inertial>
+      <origin xyz="-0.00274170 0.00250970 0.01286400" rpy="0 0 0"/>
+      <mass value="0.62964"/>
+      <inertia ixx="0.0001717" ixy="1.3446e-06" ixz="8.5164e-06"
+               iyy="0.00010506" iyz="5.1412e-05" izz="7.8944e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://moveo_description/meshes/Link_4.stl"/>
+      </geometry>
+      <material name="">
+        <color rgba="0.29412 0.29412 0.29412 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://moveo_description/meshes/Link_4_col.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Joint_4" type="revolute">
+    <origin xyz="0.16988000 -0.00099213 0.00000000" rpy="-0.04402676 1.00297628 -1.60635499"/>
+    <parent link="Link_3"/>
+    <child link="Link_4"/>
+    <axis xyz="0.010353 -0.99993 -0.0059382"/>
+    <limit lower="-1.5707" upper="1.5707" effort="5" velocity="1"/>
+  </joint>
+
+  <link name="Link_5">
+    <inertial>
+      <origin xyz="-0.01136600 0.00012239 0.00789670" rpy="0 0 0"/>
+      <mass value="0.19875"/>
+      <inertia ixx="6.2676e-05" ixy="4.2551e-06" ixz="4.0215e-05"
+               iyy="9.7792e-05" iyz="8.5888e-07" izz="9.5807e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://moveo_description/meshes/Link_5.stl"/>
+      </geometry>
+      <material name="">
+        <color rgba="0.79216 0.81961 0.93333 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://moveo_description/meshes/Link_5_col.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Joint_5" type="revolute">
+    <origin xyz="-0.00213460 0.05304100 0.00169360" rpy="-1.48048705 0.01406373 -1.64986156"/>
+    <parent link="Link_4"/>
+    <child link="Link_5"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.5707" upper="1.5707" effort="5" velocity="1"/>
+  </joint>
+
+  <!-- ros2_control -->
+  <ros2_control name="MoveoHardware" type="system">
+    <hardware>
+      <plugin>mock_components/GenericSystem</plugin>
+    </hardware>
+    <joint name="Joint_1">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="Joint_2">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="Joint_3">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="Joint_4">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="Joint_5">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+  </ros2_control>
 
 </robot>

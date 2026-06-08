@@ -1,0 +1,11 @@
+## build files
+build/
+install/
+log/
+
+## VSCode
+.vscode/
+__pycache__/
+
+## Generated log files
+src/aero_hand_open_normalize/aero_hand_open_normalize/joint_states_*.csv

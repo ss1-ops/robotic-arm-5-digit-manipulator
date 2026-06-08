@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>aero_hand_open_description</name>
+  <version>0.0.0</version>
+  <description>This package contains the URDF description of the Aero Hand Open robotic hand along with necessary launch and RViz configuration files to visualize it in RViz.</description>
+  <maintainer email="mohityadav@tetheria.ai">Mohit Yadav</maintainer>
+  <license>CC-BY-SA-4.0</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

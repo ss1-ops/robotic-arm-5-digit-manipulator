@@ -1,0 +1,234 @@
+(footprint "MOLEX_22-03-5035"
+	(version 20241229)
+	(generator "pcbnew")
+	(generator_version "9.0")
+	(layer "F.Cu")
+	(property "Reference" "REF**"
+		(at 1.170565 -4.540175 0)
+		(layer "F.SilkS")
+		(uuid "ce720928-302d-4584-a427-ee5c9af186dd")
+		(effects
+			(font
+				(size 1.001331 1.001331)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Value" "MOLEX_22-03-5035"
+		(at 8.16665 2.97154 0)
+		(layer "F.Fab")
+		(uuid "3475b81f-a6e0-4afa-b1a4-954300f37c66")
+		(effects
+			(font
+				(size 1.001811 1.001811)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "a5ddf033-6f3d-40e5-ba5b-dd260a251fe9")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Description" ""
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "ba8dbde6-112a-4f24-a0eb-01e6677e127a")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(attr through_hole)
+	(fp_line
+		(start -2.45 -3.1)
+		(end 7.45 -3.1)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "4e0300de-cf55-47d9-bd84-5e9d1734e584")
+	)
+	(fp_line
+		(start -2.45 1.8)
+		(end -2.45 -3.1)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "10dd4b05-6306-4107-b364-3349b5fda9ee")
+	)
+	(fp_line
+		(start 7.45 -3.1)
+		(end 7.45 1.8)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "e1cf5105-2bff-49ee-8963-0554bab5db86")
+	)
+	(fp_line
+		(start 7.45 1.8)
+		(end -2.45 1.8)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "d2dd83d1-d468-4f60-b946-22e087c6fa38")
+	)
+	(fp_circle
+		(center -1.5 0)
+		(end -1.4 0)
+		(stroke
+			(width 0.2)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.SilkS")
+		(uuid "12f4a211-a6b6-48c9-a54e-90e1e3fbc649")
+	)
+	(fp_line
+		(start -2.7 -3.35)
+		(end 7.7 -3.35)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "177be774-410c-4060-8514-f98a6419b206")
+	)
+	(fp_line
+		(start -2.7 2.05)
+		(end -2.7 -3.35)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "90e750d4-d5bd-4a93-a266-8d1aa1d818f0")
+	)
+	(fp_line
+		(start 7.7 -3.35)
+		(end 7.7 2.05)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "b72f25aa-df3d-4bec-9f5e-4e92b18398b7")
+	)
+	(fp_line
+		(start 7.7 2.05)
+		(end -2.7 2.05)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "f6056d27-b1c7-4305-96d1-53e084214fe6")
+	)
+	(fp_line
+		(start -2.45 -3.1)
+		(end 7.45 -3.1)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "6a36b896-9cbc-45b8-a3d5-f1c772e6dfb5")
+	)
+	(fp_line
+		(start -2.45 1.8)
+		(end -2.45 -3.1)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "1d1fc8e9-80d6-425d-bbca-bd83155b1abc")
+	)
+	(fp_line
+		(start 7.45 -3.1)
+		(end 7.45 1.8)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "e8f74766-0a29-44fd-8763-cd2da14221a5")
+	)
+	(fp_line
+		(start 7.45 1.8)
+		(end -2.45 1.8)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "3e642cba-15ca-492e-8d9d-d218a0a95e79")
+	)
+	(fp_circle
+		(center -1.5 0)
+		(end -1.4 0)
+		(stroke
+			(width 0.2)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.Fab")
+		(uuid "35d4923f-560b-4ad1-89f7-c6e88ac703b9")
+	)
+	(pad "1" thru_hole rect
+		(at 0 0)
+		(size 1.28 1.28)
+		(drill 0.85)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(solder_mask_margin 0.0762)
+		(uuid "9e9ae3d9-03e9-4017-8a4b-07bd4305c4c3")
+	)
+	(pad "2" thru_hole circle
+		(at 2.5 0)
+		(size 1.28 1.28)
+		(drill 0.85)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(solder_mask_margin 0.0762)
+		(uuid "b548e347-09ed-4263-8bbb-4ba26c5a5acc")
+	)
+	(pad "3" thru_hole circle
+		(at 5 0)
+		(size 1.28 1.28)
+		(drill 0.85)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(solder_mask_margin 0.0762)
+		(uuid "823a0dd5-5081-49a4-9605-31d142bdadc6")
+	)
+	(embedded_fonts no)
+	(model "D:/COMPONENT IMPORTS/Molex 220305025/22-03-5035.step"
+		(offset
+			(xyz 2.5 0.8 0)
+		)
+		(scale
+			(xyz 1 1 1)
+		)
+		(rotate
+			(xyz -90 -0 -0)
+		)
+	)
+)

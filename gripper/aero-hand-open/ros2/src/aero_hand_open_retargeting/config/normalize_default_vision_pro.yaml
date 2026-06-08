@@ -1,0 +1,48 @@
+thumb_cmc_abd:
+  peak: 1.45
+  valley: 0.3132463991641998
+thumb_cmc_flex:
+  peak: 0.5502389073371887
+  valley: 0.35
+thumb_mcp:
+  peak: 0.8003998398780823
+  valley: 0.15
+thumb_ip:
+  peak: 0.8
+  valley: 0.15
+index_mcp_flex:
+  peak: 1.1260203123092651
+  valley: 0.0205028764903545
+index_pip:
+  peak: 1.6936075687408447
+  valley: 0.023992778733372
+index_dip:
+  peak: 0.9465882778167723
+  valley: 0.068304887972772
+middle_mcp_flex:
+  peak: 1.0
+  valley: 0.1027596741914749
+middle_pip:
+  peak: 1.5
+  valley: 0.0710084810853004
+middle_dip:
+  peak: 1.0
+  valley: 0.0562263019382953
+ring_mcp_flex:
+  peak: 0.8
+  valley: 0.0348809845745563
+ring_pip:
+  peak: 0.8
+  valley: 0.3022475242614746
+ring_dip:
+  peak: 0.9
+  valley: 0.0627631098031997
+pinky_mcp_flex:
+  peak: 0.8
+  valley: 0.6166641935706138
+pinky_pip:
+  peak: 0.9
+  valley: 0.226615622639656
+pinky_dip:
+  peak: 0.8
+  valley: 0.695278793573379
