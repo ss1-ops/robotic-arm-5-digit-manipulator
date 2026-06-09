@@ -31,6 +31,38 @@ v4l2-ctl -d /dev/video0 --list-formats-ext | grep -A3 MJPG   # confirm 2560x960 
 groups | grep -q video || sudo usermod -aG video $USER       # then re-login
 ```
 
+## Offloading vision to your Mac / stronger compute (recommended for speed)
+
+The Pi is the bottleneck for SGBM depth + blob detection + closed-loop servoing while also running the motor controller.
+
+**Lightweight Pi setup (camera + streaming + motors only):**
+
+```bash
+# On Pi (minimal load)
+python3 stereo_camera_node.py --ros-args -p device:=0 -p calib:=/home/armpi/vision/stereo_calib.yaml &
+python3 mjpeg_stream.py --ros-args -p calib:=/home/armpi/vision/stereo_calib.yaml -p proc_quality:=85 &
+python3 ~/ros_nodes/moveo_publisher.py
+```
+
+From your Mac:
+
+```bash
+cd software/vision
+python3 mac_stereo_grabber.py --host 192.168.1.142
+python3 mac_processor.py --host 192.168.1.142 --calib calibration/stereo_calib.yaml
+```
+
+`mac_processor.py` demonstrates grabbing pairs and running the full SGBM + depth pipeline locally (much faster on a real computer).
+
+You can now port the detection + servo logic (from the old `goto_object.py`, `approach_object.py`, etc.) to the Mac. The Mac code grabs frames via the HTTP endpoints (`/left`, `/right`), does all the heavy lifting, and sends joint commands over the existing TCP socket to the Pi's `moveo_publisher` (port 9000) — exactly like the simple controller GUI already does.
+
+Benefits:
+- Pi is now mostly just capturing + encoding JPEGs + executing motor steps.
+- You can use better SGBM parameters, more median samples, higher-res processing, etc.
+- Frame rates for the vision loop go up dramatically.
+
+See `mac_stereo_grabber.py` and `mac_processor.py` for the starting point. The kinematics are pure Python and importable on the Mac side too.
+
 The ELP usually presents two `/dev/video` nodes (capture + metadata); use the
 capture one. Pass it via `device:=N` (integer index) below.
 

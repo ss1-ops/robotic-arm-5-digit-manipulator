@@ -59,6 +59,10 @@ try:
         L_WRIST as _L_WRIST,
         L_EE as _L_EE,
         MAX_REACH as _MAX_REACH,
+        forward_kinematics,          # returns final user frame (after 180 Z)
+        chain_to_user,
+        user_to_chain,
+        forward_kinematics_matrix,   # 4x4 in the internal model frame
     )
     print("[IK] using kinematics.py (single source of truth) from same directory")
 except Exception as _e:
@@ -77,18 +81,18 @@ except Exception as _e:
             active_links_mask=[False, True, True, True, True, True, False],
             links=[
                 OriginLink(),
-                # J1: waist — rotates about Z (yaw, swings arm left/right in X-Y plane)
+                # J1: waist yaw about +Z. Positive (RH, Z up) CCW from above.
+                # j1=0 → arm bend plane +X_model; +j1 yaws reach toward +Y_model.
                 URDFLink("j1", origin_translation=[0, 0, _L_BASE],  origin_orientation=[0,0,0], rotation=[0,0,1], bounds=(-2.00, 2.40)),
-                # J2: shoulder — rotates about X (pitch, swings upper arm in Y-Z plane)
-                #   At home (j2=0) upper arm points straight up along +Z
-                URDFLink("j2", origin_translation=[0, 0, _L_WAIST], origin_orientation=[0,0,0], rotation=[1,0,0], bounds=(-1.95, 1.95)),
-                # J3: elbow — upper arm length along Z; rotates about X
-                URDFLink("j3", origin_translation=[0, 0, _L_UPPER], origin_orientation=[0,0,0], rotation=[1,0,0], bounds=(-2.20, 2.20)),
-                # J4: wrist roll — forearm length along Z; rotates about Z (roll)
+                # J2: shoulder pitch about +Y. Positive bends upper arm toward +X_model.
+                URDFLink("j2", origin_translation=[0, 0, _L_WAIST], origin_orientation=[0,0,0], rotation=[0,1,0], bounds=(-1.95, 1.95)),
+                # J3: elbow pitch about +Y. Positive bends toward +X_model in current plane.
+                URDFLink("j3", origin_translation=[0, 0, _L_UPPER], origin_orientation=[0,0,0], rotation=[0,1,0], bounds=(-2.20, 2.20)),
+                # J4: wrist roll about local Z.
                 URDFLink("j4", origin_translation=[0, 0, _L_FORE],  origin_orientation=[0,0,0], rotation=[0,0,1], bounds=(-3.14, 3.14)),
-                # J5: wrist pitch — rotates about X
-                URDFLink("j5", origin_translation=[0, 0, _L_WRIST], origin_orientation=[0,0,0], rotation=[1,0,0], bounds=(-1.75, 1.75)),
-                # End effector (passive) — extends upward along Z
+                # J5: wrist pitch about +Y. Positive toward +X_model local.
+                URDFLink("j5", origin_translation=[0, 0, _L_WRIST], origin_orientation=[0,0,0], rotation=[0,1,0], bounds=(-1.75, 1.75)),
+                # End effector (passive).
                 URDFLink("ee", origin_translation=[0, 0, _L_EE],    origin_orientation=[0,0,0], rotation=[0,0,0], bounds=(0, 0)),
             ],
         )
@@ -98,6 +102,25 @@ except Exception as _e:
     _MAX_REACH = _L_UPPER + _L_FORE + _L_WRIST + _L_EE
     MAX_REACH = _MAX_REACH  # for any code that expects the public name
 
+    # Fallback converters (180° Z, self-inverse)
+    def forward_kinematics(joints):
+        full = [0.0] + list(joints) + [0.0]
+        fk = MOVEO_CHAIN.forward_kinematics(full)
+        cx, cy, cz = float(fk[0,3]), float(fk[1,3]), float(fk[2,3])
+        return chain_to_user((cx, cy, cz)) if 'chain_to_user' in dir() else (-cx, -cy, cz)
+
+    def chain_to_user(p):
+        x, y, z = p
+        return -float(x), -float(y), float(z)
+
+    def user_to_chain(p):
+        x, y, z = p
+        return -float(x), -float(y), float(z)
+
+    def forward_kinematics_matrix(joints):
+        full = [0.0] + list(joints) + [0.0]
+        return MOVEO_CHAIN.forward_kinematics(full)
+
 # Back-compat: ensure _MAX_REACH exists even in import-success path
 if "_MAX_REACH" not in dir():
     _MAX_REACH = MAX_REACH if "MAX_REACH" in dir() else (_L_UPPER + _L_FORE + _L_WRIST + _L_EE)
@@ -106,24 +129,21 @@ if "_MAX_REACH" not in dir():
 def solve_ik(xyz: list, current_joints: list = None) -> tuple:
     """Return ([j1..j5], fk_err_mm) for Cartesian target xyz (metres).
 
-    FRAME: callers use the robot/REP-103 convention +X=forward, +Y=left, +Z=up.
-    The internal kinematic chain is rotated 90° from this (its +X points to the
-    robot's LEFT, +Y points BEHIND), so we rotate the incoming target -90° about
-    Z into the chain frame: (x, y) -> (y, -x). Joint outputs are frame-independent.
+    Public xyz is in the final *user frame* (model rotated 180° about Z).
+    The ikpy solver and warm-starts run in the internal *model* frame
+    (where +J2/+J3/+J5 bend to +X_model, +J1 yaws to +Y_model).
+    user_to_chain / chain_to_user (from kinematics) perform the 180° Z.
 
-    When current_joints ([j1..j5] radians) is provided, biases the solution
-    toward the current configuration so the arm never flips elbow-up/down
-    unexpectedly during continuous motion.
-    Raises ValueError if the target is outside the arm's workspace.
+    Callers (GUI, vision goto_object, etc.) always use the public user frame.
+    When current_joints is provided, biases toward the current configuration.
+    Raises ValueError if outside workspace.
     """
     import math as _math
     if not _IKPY_AVAILABLE or MOVEO_CHAIN is None:
         raise RuntimeError("ikpy is not installed on this Pi")
 
-    # User frame (+X forward, +Y left) -> internal chain frame (-90° about Z).
-    # Reassign xyz itself so the ikpy call (target_position=xyz) also uses it.
-    xyz = [xyz[1], -xyz[0], xyz[2]]
-    x, y, z = xyz[0], xyz[1], xyz[2]
+    # Public user target → internal model frame for the solver
+    x, y, z = user_to_chain(xyz) if 'user_to_chain' in dir() else (-xyz[0], -xyz[1], xyz[2])
 
     # Reachability check — Euclidean distance from shoulder pivot to target
     dist = _math.sqrt(x*x + y*y + (z - _L_BASE)**2)
@@ -133,31 +153,22 @@ def solve_ik(xyz: list, current_joints: list = None) -> tuple:
             f"exceeds max reach {_MAX_REACH:.3f}m"
         )
 
-    # J1: waist azimuth toward target. At j1=0 the arm's reach plane points to
-    # +Y (positive reach swings the tip toward +Y), so the reach DIRECTION is at
-    # azimuth +90°. To aim it straight at the target we must offset the target
-    # azimuth by -90°. Without this offset the seed is 90° off and the optimizer
-    # drifts to the "reach-behind" branch (waist ~+90° + 180° wrist roll), which
-    # physically looks like the arm bending backward for +X targets.
+    # J1 azimuth: at j1=0 the arm bend plane is +X_model (positive J2/J3 bend forward +X_model).
+    # Positive J1 (CCW about +Z) yaws that plane toward +Y_model. So target azimuth is direct.
     if abs(x) > 1e-4 or abs(y) > 1e-4:
-        j1_aim = _math.atan2(y, x) - _math.pi / 2.0
-        # wrap to (-pi, pi] then clamp to the reachable waist range
+        j1_aim = _math.atan2(y, x)
         j1_aim = (j1_aim + _math.pi) % (2 * _math.pi) - _math.pi
         j1_guess = max(-2.00, min(2.40, j1_aim))
     else:
         j1_guess = 0.0
 
     # 2R analytical pre-solve for J2, J3 warm starts (J5=0, wrist aligned).
-    # Geometry: vertical chain — at home both links point along +Z.
-    # Positive j2/j3 (right-hand rule about +X) swings the arm toward +Y.
-    # Angles measured from +Z (vertical), so:
-    #   j2 = atan2(r_h, dz) - atan2(L2*sin_j3, L1 + L2*cos_j3)
-    #   j3 = signed elbow bend angle
-    r_h    = _math.sqrt(x*x + y*y)   # horizontal distance to target
-    # Height above the *shoulder pitch* (J2) axis. The 2R (j2/j3) starts at the J2 pivot,
-    # which is L_WAIST above the J1 origin used for _L_BASE in the chain.
+    # Geometry: at home links point along +Z. Positive J2/J3 (RH about +Y) swing
+    # the arm toward +X_model (forward) in the plane defined by current j1.
+    #   j2 = gamma - atan2(L2*sin_j3, L1 + L2*cos_j3)
+    #   j3 = signed elbow bend
+    r_h    = _math.sqrt(x*x + y*y)   # horizontal distance to target (cylindrical)
     dz_sh  = z - (_L_BASE + _L_WAIST)
-    # Effective L2 for 2R analytical warm-start: FORE + WRIST + EE (when wrist straight).
     L1, L2 = _L_UPPER, _L_FORE + _L_WRIST + _L_EE
     cos_j3 = max(-1.0, min(1.0, (r_h**2 + dz_sh**2 - L1**2 - L2**2) / (2*L1*L2)))
     sin_j3_abs = _math.sqrt(max(0.0, 1.0 - cos_j3**2))
@@ -413,13 +424,12 @@ def serve(node: JointPublisherNode):
                                 raise ValueError(f"collision/limit: {reason}")
                             with _publish_lock:
                                 node.publish(angles)
-                            # Compute achieved position in *user frame* using the exact angles being sent.
-                            # This lets the caller see what the solver's model says the EE will be at
-                            # (should closely match the requested target when err is low).
+                            # Compute achieved in *user frame* (model rotated 180° Z) using the exact
+                            # angles being sent. This lets callers see the position in the same frame
+                            # as the cartesian target they sent.
                             full = [0.0] + list(angles) + [0.0]
-                            fk_int = MOVEO_CHAIN.forward_kinematics(full)
-                            ix, iy, iz = fk_int[0, 3], fk_int[1, 3], fk_int[2, 3]
-                            achieved = [-iy, ix, iz]  # internal -> user frame (inverse of the IK transform)
+                            fk = MOVEO_CHAIN.forward_kinematics(full)
+                            achieved = list(chain_to_user((fk[0, 3], fk[1, 3], fk[2, 3])))
                             ack = json.dumps({
                                 "ok": True,
                                 "angles": [round(a, 6) for a in angles],   # higher precision to reduce FK recompute error

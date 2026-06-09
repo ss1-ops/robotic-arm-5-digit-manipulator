@@ -27,17 +27,26 @@ from sensor_msgs.msg import Image, JointState
 sys.path.insert(0, "/home/armpi/ros_nodes")
 import moveo_publisher as mp
 
-CAM_T = np.array([-0.05, -0.03, 0.0])  # left camera in EE frame (URDF)
+CAM_T = np.array([-0.05, 0.03, 0.0])  # left camera in EE (model frame). Final reported positions (obj_user etc.) are rotated 180° Z into the public user frame via chain_to_user.
 JOINT_LIM = [(-2.00, 2.40), (-1.95, 1.95), (-2.20, 2.20), (-3.14, 3.14), (-1.75, 1.75)]
 MIN_BLOB_AREA = 300  # px²
 
 
 def fk_base_ee(q5):
+    # Returns the 4x4 in the *internal model* frame.
+    # CAM_T and depth rays are expressed in EE model; obj_base is therefore in base_model.
+    # Callers then use to_user / mp.chain_to_user (the 180° Z) to get final public user coords.
+    if hasattr(mp, 'forward_kinematics_matrix'):
+        return mp.forward_kinematics_matrix(q5)
     return mp.MOVEO_CHAIN.forward_kinematics([0.0] + list(q5) + [0.0])
 
 
 def to_user(p):
-    return [-float(p[1]), float(p[0]), float(p[2])]
+    # Apply 180° Z (model → final public user frame).
+    if hasattr(mp, "chain_to_user"):
+        return mp.chain_to_user(p)
+    # fallback 180 Z
+    return [-float(p[0]), -float(p[1]), float(p[2])]
 
 
 def img_to_np(msg):

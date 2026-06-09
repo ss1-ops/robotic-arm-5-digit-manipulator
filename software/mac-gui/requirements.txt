@@ -1,2 +1,5 @@
 paramiko==3.4.0
 PyQt5==5.15.10
+opencv-python
+numpy
+requests

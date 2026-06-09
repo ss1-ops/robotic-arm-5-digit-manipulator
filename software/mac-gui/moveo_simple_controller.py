@@ -15,7 +15,9 @@ Sending a command:
 
 import json
 import math
+import os
 import shlex
+import socket
 import sys
 import threading
 import time
@@ -26,9 +28,9 @@ import paramiko
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QSlider, QLineEdit, QPushButton, QGroupBox, QGridLayout,
-    QPlainTextEdit, QMessageBox, QSizePolicy,
+    QPlainTextEdit, QMessageBox, QSizePolicy, QDoubleSpinBox, QSpinBox,
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QObject
+from PyQt5.QtCore import Qt, pyqtSignal, QObject, QTimer
 from PyQt5.QtGui import QImage, QPixmap, QColor
 
 
@@ -50,7 +52,7 @@ JOINTS = [
 SLIDER_SCALE   = 100   # slider integer units per radian
 PUBLISHER_PORT = 9000  # TCP port on the Pi where moveo_publisher.py listens
 PI_HOST        = "192.168.1.142"  # Pi IP (mDNS 'armpi.local' resolution is flaky; use IP)
-CAMERA_URL     = f"http://{PI_HOST}:8080/"  # MJPEG stream from the Pi camera
+CAMERA_URL     = f"http://{PI_HOST}:8080/stream"  # MJPEG stream from the Pi (use /stream for the multipart feed; / serves a viewer page)
 
 
 # ── Worker ─────────────────────────────────────────────────────────────────────
@@ -67,7 +69,7 @@ class Worker(QObject):
         # Cleanup for Connect (light reconnect by default) using printf to write a temp script.
         # This keeps the sent command as a single line (no \n in cmd value) to avoid any multi-line parsing issues in paramiko + remote bash -c.
         # We now prefer to LEAVE the micro_ros_agent running as a persistent bridge.
-        "printf \"echo '[startup] cleanup: phase 0 - sourcing'\\n source /opt/ros/jazzy/setup.bash 2>/dev/null || source ~/microros_ws/install/setup.bash 2>/dev/null || true\\n echo '[startup] cleanup: phase 1 - /reboot kick to ESP (while agent stays alive)'\\n timeout 3s ros2 topic pub --once /reboot std_msgs/msg/Float32 '{data: 1.0}' >/dev/null 2>&1 || true; sleep 0.3\\n echo '[startup] cleanup: phase 2 - pkill non-agent nodes (keep micro_ros_agent running)'\\n pkill -9 -f 'moveo_publisher.py' 2>/dev/null || true\\n pkill -9 -f 'stereo_camera_node.py' 2>/dev/null || true\\n pkill -9 -f 'stereo_depth_node.py' 2>/dev/null || true\\n pkill -9 -f 'mjpeg_stream.py' 2>/dev/null || true\\n pkill -9 -f 'goto_object.py' 2>/dev/null || true\\n pkill -9 -f 'approach_object.py' 2>/dev/null || true\\n echo '[startup] cleanup: phase 3 - report tty holders (agent should be the only one)'\\n echo 'holders of /dev/ttyACM0:'; fuser /dev/ttyACM0 2>/dev/null || echo '(none or not visible)'\\n echo '[startup] cleanup: phase 4 - shm cleanup'\\n sleep 1\\n rm -f /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_* 2>/dev/null || true\\n echo '[startup] cleanup done - micro_ros_agent left running, ESP kicked via /reboot'\\n \" > /tmp/gui_cleanup.sh ; bash /tmp/gui_cleanup.sh"
+        "printf \"echo '[startup] cleanup: phase 0 - sourcing'\\n source /opt/ros/jazzy/setup.bash 2>/dev/null || source ~/microros_ws/install/setup.bash 2>/dev/null || true\\n echo '[startup] cleanup: phase 1 - /reboot kick to ESP (while agent stays alive)'\\n timeout 3s ros2 topic pub --once /reboot std_msgs/msg/Float32 '{data: 1.0}' >/dev/null 2>&1 || true; sleep 0.3\\n echo '[startup] cleanup: phase 2 - pkill non-agent nodes (keep micro_ros_agent running)'\\n pkill -9 -f 'moveo_publisher.py' 2>/dev/null || true\\n pkill -9 -f 'direct_stream.py' 2>/dev/null || true\\n pkill -9 -f 'stereo_camera_node.py' 2>/dev/null || true\\n pkill -9 -f 'stereo_depth_node.py' 2>/dev/null || true\\n pkill -9 -f 'mjpeg_stream.py' 2>/dev/null || true\\n pkill -9 -f 'goto_object.py' 2>/dev/null || true\\n pkill -9 -f 'approach_object.py' 2>/dev/null || true\\n echo '[startup] cleanup: phase 3 - report tty holders (agent should be the only one)'\\n echo 'holders of /dev/ttyACM0:'; fuser /dev/ttyACM0 2>/dev/null || echo '(none or not visible)'\\n echo '[startup] cleanup: phase 4 - shm cleanup'\\n sleep 1\\n rm -f /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_* 2>/dev/null || true\\n echo '[startup] cleanup done - micro_ros_agent left running, ESP kicked via /reboot'\\n \" > /tmp/gui_cleanup.sh ; bash /tmp/gui_cleanup.sh"
     )
 
     _CMD_AGENT = (
@@ -105,12 +107,10 @@ class Worker(QObject):
         '  || { echo "[startup] ERROR: publisher failed"; cat /tmp/moveo_publisher.log; }'
     )
     _CMD_VISION = (
-        # Start the stereo camera node + browser MJPEG stream (detached).
-        # Camera streams raw (as-mounted) frames; the stream display-rotates for viewing.
-        "source /opt/ros/jazzy/setup.bash; "
+        # Start the direct camera MJPEG stream (no ROS — pure OpenCV + HTTP).
         "bash ~/vision/start_vision.sh > /tmp/vision_start.log 2>&1; "
         "sleep 1; "
-        "pgrep -f stereo_camera_node > /dev/null "
+        "pgrep -f direct_stream > /dev/null "
         '  && echo "[startup] vision up — view: http://armpi.local:8080/" '
         '  || { echo "[startup] WARNING: vision not running"; cat /tmp/vision_start.log; }'
     )
@@ -509,6 +509,39 @@ class MainWindow(QMainWindow):
         fkh.addStretch()
         vlay.addWidget(fk_box)
 
+        # ── Vision Approach (full offload to Mac, same as old Pi goto_object) ────
+        vision_box = QGroupBox("Vision Approach (Mac offload — full port)")
+        vv = QVBoxLayout(vision_box)
+        note = QLabel("Pi only streams camera + executes commands. Mac does blob, SGBM depth, pose, IK target, j5 aim. Click 'Start' after jogging + 'Send All Joints'.")
+        note.setWordWrap(True)
+        vv.addWidget(note)
+        h = QHBoxLayout()
+        self._vision_standoff = QDoubleSpinBox()
+        self._vision_standoff.setRange(0.05, 0.40)
+        self._vision_standoff.setValue(0.22)
+        self._vision_standoff.setSingleStep(0.01)
+        h.addWidget(QLabel("Standoff (m):"))
+        h.addWidget(self._vision_standoff)
+        self._vision_h_lo = QSpinBox(); self._vision_h_lo.setRange(0,179); self._vision_h_lo.setValue(0)
+        self._vision_h_hi = QSpinBox(); self._vision_h_hi.setRange(0,179); self._vision_h_hi.setValue(179)
+        self._vision_s = QSpinBox(); self._vision_s.setRange(0,255); self._vision_s.setValue(80)
+        self._vision_v = QSpinBox(); self._vision_v.setRange(0,255); self._vision_v.setValue(80)
+        h.addWidget(QLabel("HSV (lo-hi, s, v):"))
+        h.addWidget(self._vision_h_lo); h.addWidget(self._vision_h_hi)
+        h.addWidget(self._vision_s); h.addWidget(self._vision_v)
+        vv.addLayout(h)
+        bh = QHBoxLayout()
+        self._btn_vision = QPushButton("Start Approach (Mac offload)")
+        self._btn_vision.clicked.connect(self._start_vision_offload)
+        bh.addWidget(self._btn_vision)
+        stopv = QPushButton("Stop")
+        stopv.clicked.connect(lambda: setattr(self, '_vision_stop', True))
+        bh.addWidget(stopv)
+        vv.addLayout(bh)
+        vlay.addWidget(vision_box)
+
+        self._vision_stop = False
+
         # Speed control
         speed_box = QGroupBox("Speed")
         sh = QHBoxLayout(speed_box)
@@ -620,11 +653,19 @@ class MainWindow(QMainWindow):
         self._set_controls_enabled(False)
 
         # Start the camera stream (independent of the SSH/ROS connection)
+        # We prefer polling the reliable single-JPEG /left endpoint (added for Mac offload)
+        # over the multipart MJPEG parser, for robustness.
         self._last_frame: QImage | None = None
+        self._cam_timer = QTimer(self)
+        self._cam_timer.timeout.connect(self._poll_camera_frame)
+        self._cam_timer.start(150)  # ~6-7 fps is plenty for viewing + clicking
+
+        # Legacy CameraWorker kept (but not started) — the polling /left above is more reliable
+        # for the live camera viewer and matches the offload grabber.
         self._camera = CameraWorker(CAMERA_URL)
         self._camera.frame.connect(self._on_camera_frame)
         self._camera.status.connect(self._on_camera_status)
-        self._camera.start()
+        # Not starting the multipart worker; polling is sufficient and robust.
 
     def _on_camera_frame(self, img: QImage):
         self._last_frame = img
@@ -633,6 +674,25 @@ class MainWindow(QMainWindow):
     def _on_camera_status(self, msg: str):
         if msg:
             self._cam_label.setText(f"camera: {msg}")
+
+    def _poll_camera_frame(self):
+        """Poll the reliable single JPEG /left endpoint for live viewing.
+        This is more robust than parsing the continuous multipart stream
+        and matches the grabber used by the Mac offload vision code.
+        """
+        try:
+            url = f"http://{PI_HOST}:8080/left"
+            data = urllib.request.urlopen(url, timeout=0.8).read()
+            img = QImage.fromData(data, "JPG")
+            if not img.isNull():
+                self._last_frame = img
+                self._update_camera_pixmap()
+        except Exception as e:
+            # Don't spam the label on every poll failure
+            if not hasattr(self, "_last_cam_err") or self._last_cam_err != str(e):
+                self._last_cam_err = str(e)
+                # self._cam_label.setText(f"camera: poll error - {e}")  # optional
+            pass  # silent retry on next timer tick
 
     def _update_camera_pixmap(self):
         if self._last_frame is None or self._last_frame.isNull():
@@ -684,7 +744,6 @@ class MainWindow(QMainWindow):
         threading.Thread(target=lambda: self._worker.send_angles(angles), daemon=True).start()
 
     def _on_camera_click(self, x, y):
-        """Full click-to-go: center (fresh-frame servo) + camera-mount cartesian."""
         if not self._worker.connected:
             self._append_log("[approach] connect SSH first"); return
         if self._estop:
@@ -692,17 +751,17 @@ class MainWindow(QMainWindow):
         lo, hi = self._sample_hsv(x, y)
         if lo is None:
             self._append_log("[approach] click directly on a COLORED object"); return
-        self._append_log(f"[approach] going to object  HSV {lo}-{hi}, stop ~22cm  (✋ to abort)")
+        standoff = self._vision_standoff.value()
+        self._append_log(
+            f"[approach] Mac offload → HSV lo={lo} hi={hi}  standoff={standoff*100:.0f}cm  (✋ to abort)"
+        )
+        self._vision_stop = False
         angles = [self._sliders[i].value() / SLIDER_SCALE for i in range(len(JOINTS))]
-        cmd = (f"bash ~/vision/run_approach_object.sh "
-               f"{lo[0]} {lo[1]} {lo[2]} {hi[0]} {hi[1]} {hi[2]} 0.22")
-
-        def _go():
-            self._worker.send_angles(angles)
-            time.sleep(0.5)
-            self._worker._exec(cmd, timeout=15)
-            self._worker.stream_approach_log()
-        threading.Thread(target=_go, daemon=True).start()
+        threading.Thread(
+            target=self._run_offload_approach,
+            args=(lo, hi, angles, standoff),
+            daemon=True,
+        ).start()
 
     def _sample_hsv(self, x, y):
         """Average a small patch at the click and return OpenCV HSV lo/hi range."""
@@ -735,11 +794,8 @@ class MainWindow(QMainWindow):
         return lo, hi
 
     def _stop_approach(self):
-        if self._worker.connected:
-            threading.Thread(target=lambda: self._worker._exec(
-                "pkill -9 -f 'approach_object.py|goto_object.py|approach_servo.py|stereo_depth_node.py' 2>/dev/null", timeout=8),
-                daemon=True).start()
-        self._append_log("[approach] stop sent")
+        self._vision_stop = True
+        self._append_log("[approach] stop requested")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -883,6 +939,94 @@ class MainWindow(QMainWindow):
             self._fk_label.setText(f"x={x:.3f} y={y:.3f} z={z:.3f} m")
         except Exception as e:
             self._fk_label.setText(f"FK error: {e}")
+
+    def _start_vision_offload(self):
+        if not self._worker.connected or self._estop:
+            self._append_log("[approach] not connected or E-STOP active"); return
+        lo = [self._vision_h_lo.value(), self._vision_s.value(), self._vision_v.value()]
+        hi = [self._vision_h_hi.value(), 255, 255]
+        standoff = self._vision_standoff.value()
+        self._vision_stop = False
+        self._append_log(f"[approach] Mac offload (manual HSV) → lo={lo} hi={hi}  standoff={standoff*100:.0f}cm")
+        angles = [self._sliders[i].value() / SLIDER_SCALE for i in range(len(JOINTS))]
+        threading.Thread(
+            target=self._run_offload_approach,
+            args=(lo, hi, angles, standoff),
+            daemon=True,
+        ).start()
+
+    def _run_offload_approach(self, lo, hi, angles, standoff):
+        gui_dir = os.path.dirname(os.path.abspath(__file__))
+        vision_dir = os.path.join(os.path.dirname(gui_dir), "vision")
+        if vision_dir not in sys.path:
+            sys.path.insert(0, vision_dir)
+        try:
+            from mac_goto_object import MacGotoObject
+        except Exception as e:
+            self._append_log(f"[approach] import failed: {e}"); return
+
+        def log(msg):
+            self._append_log(f"[approach] {msg}")
+
+        def send_j(q):
+            if self._vision_stop:
+                raise RuntimeError("stopped by user")
+            try:
+                s = socket.create_connection((PI_HOST, PUBLISHER_PORT), timeout=5)
+                sf = s.makefile("r")
+                s.sendall((json.dumps({"position": [round(float(a), 5) for a in q]}) + "\n").encode())
+                resp = json.loads(sf.readline().strip())
+                s.close()
+                out = resp.get("angles", list(q))
+                self._worker.angles_update.emit(out)
+                return out
+            except RuntimeError:
+                raise
+            except Exception as e:
+                log(f"send_joints error: {e}")
+                return list(q)
+
+        def send_c(xyz):
+            if self._vision_stop:
+                raise RuntimeError("stopped by user")
+            try:
+                s = socket.create_connection((PI_HOST, PUBLISHER_PORT), timeout=5)
+                sf = s.makefile("r")
+                s.sendall((json.dumps({"cartesian": [round(float(v), 4) for v in xyz]}) + "\n").encode())
+                resp = json.loads(sf.readline().strip())
+                s.close()
+                if resp.get("ok") and "angles" in resp:
+                    self._worker.angles_update.emit(resp["angles"])
+                    return list(resp["angles"])
+            except RuntimeError:
+                raise
+            except Exception as e:
+                log(f"send_cartesian error: {e}")
+            return list(angles)
+
+        calib = os.path.join(gui_dir, "..", "vision", "calibration", "stereo_calib.yaml")
+        try:
+            approach = MacGotoObject(
+                pi_host=PI_HOST,
+                stream_port=8080,
+                cmd_port=PUBLISHER_PORT,
+                calib_path=calib,
+                standoff=standoff,
+                h_lo=lo[0], h_hi=hi[0],
+                s_lo=lo[1], s_hi=hi[1],
+                v_lo=lo[2], v_hi=hi[2],
+                initial_joints=list(angles),
+                log_func=log,
+                send_cartesian_func=send_c,
+                send_joints_func=send_j,
+            )
+            approach.run()
+        except RuntimeError as e:
+            self._append_log(f"[approach] {e}")
+        except Exception as e:
+            self._append_log(f"[approach] error: {e}")
+        finally:
+            self._append_log("[approach] finished")
 
     def _set_as_home(self):
         """Declare current physical position as home — zeros ESP32 counters without moving."""

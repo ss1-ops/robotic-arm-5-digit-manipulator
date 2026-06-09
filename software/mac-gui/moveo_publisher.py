@@ -81,7 +81,8 @@ def solve_ik(xyz: list, current_joints: list = None) -> tuple:
     if not _IKPY_AVAILABLE or MOVEO_CHAIN is None:
         raise RuntimeError("ikpy is not installed on this Pi")
 
-    x, y, z = xyz[0], xyz[1], xyz[2]
+    # Public user target → internal model frame (180° Z)
+    x, y, z = user_to_chain(xyz) if 'user_to_chain' in dir() else (-xyz[0], -xyz[1], xyz[2])
 
     # Reachability check — Euclidean distance from shoulder pivot to target
     dist = _math.sqrt(x*x + y*y + (z - _L_BASE)**2)
@@ -91,14 +92,13 @@ def solve_ik(xyz: list, current_joints: list = None) -> tuple:
             f"exceeds max reach {_MAX_REACH:.3f}m"
         )
 
-    # J1: waist azimuth toward target (prevents 180° flip local minima)
+    # J1: waist azimuth (computed in model frame after 180 Z conversion)
     j1_guess = _math.atan2(y, x) if (abs(x) > 1e-4 or abs(y) > 1e-4) else 0.0
 
     # 2R analytical pre-solve for J2, J3 warm starts (J5=0, wrist aligned).
-    # Geometry: vertical chain — at home both links point along +Z.
-    # Positive j2/j3 (right-hand rule about +X) swings the arm toward +Y.
-    # Angles measured from +Z (vertical), so:
-    #   j2 = atan2(r_h, dz) - atan2(L2*sin_j3, L1 + L2*cos_j3)
+    # Geometry: at home links point along +Z. Positive J2/J3 (RH about +Y) swing
+    # the arm toward +X_model (forward) in the plane defined by current j1.
+    #   j2 = gamma - atan2(L2*sin_j3, L1 + L2*cos_j3)
     #   j3 = signed elbow bend angle
     r_h    = _math.sqrt(x*x + y*y)   # horizontal distance to target
     # Height above the *shoulder pitch* (J2) axis. The 2R (j2/j3) starts at the J2 pivot,
