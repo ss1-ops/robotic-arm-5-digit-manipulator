@@ -55,7 +55,7 @@ import kinematics as kin
 from mac_stereo_grabber import StereoGrabber
 
 # Same limits as Pi side
-JOINT_LIM = [(-2.00, 2.40), (-1.95, 1.95), (-2.20, 2.20), (-3.14, 3.14), (-1.75, 1.75)]
+JOINT_LIM = [(-2.00, 2.40), (-1.95, 1.95), (-2.20, 2.20), (-3.14, 3.14), (-1.60, 1.60)]
 MIN_BLOB_AREA = 300
 CAM_T = np.array([-0.05, 0.03, 0.0])  # left camera in EE (model frame)
 
@@ -320,7 +320,7 @@ class MacGotoObject:
         sin_a = float(np.dot(np.cross(cp, ap), j5_axis))
         delta = float(np.arctan2(sin_a, cos_a))
         q_new = list(q_ik)
-        q_new[4] = float(np.clip(q_ik[4] + delta, -1.75, 1.75))
+        q_new[4] = float(np.clip(q_ik[4] + delta, -1.60, 1.60))
         return q_new
 
     # --- Main sequence (ported) ---

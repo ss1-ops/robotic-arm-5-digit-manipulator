@@ -61,7 +61,7 @@ if _IKPY_AVAILABLE:
             # J4: wrist roll about local Z (forearm twist).
             URDFLink("j4", origin_translation=[0, 0, L_FORE],  origin_orientation=[0,0,0], rotation=[0,0,1], bounds=(-3.14, 3.14)),
             # J5: wrist pitch about +Y. Positive bends the tip toward +X in the local forearm frame.
-            URDFLink("j5", origin_translation=[0, 0, L_WRIST], origin_orientation=[0,0,0], rotation=[0,1,0], bounds=(-1.75, 1.75)),
+            URDFLink("j5", origin_translation=[0, 0, L_WRIST], origin_orientation=[0,0,0], rotation=[0,1,0], bounds=(-1.60, 1.60)),
             # End effector (passive) — extends along previous Z at zero pose.
             URDFLink("ee", origin_translation=[0, 0, L_EE],    origin_orientation=[0,0,0], rotation=[0,0,0], bounds=(0, 0)),
         ],

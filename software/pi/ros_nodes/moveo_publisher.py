@@ -103,7 +103,7 @@ except Exception as _e:
                 # J4: wrist roll — forearm length along Z; rotates about Z (roll)
                 URDFLink("j4", origin_translation=[0, 0, _L_FORE],  origin_orientation=[0,0,0], rotation=[0,0,1], bounds=(-3.14, 3.14)),
                 # J5: wrist pitch — rotates about X
-                URDFLink("j5", origin_translation=[0, 0, _L_WRIST], origin_orientation=[0,0,0], rotation=[1,0,0], bounds=(-1.75, 1.75)),
+                URDFLink("j5", origin_translation=[0, 0, _L_WRIST], origin_orientation=[0,0,0], rotation=[1,0,0], bounds=(-1.60, 1.60)),
                 # End effector (passive) — extends upward along Z
                 URDFLink("ee", origin_translation=[0, 0, _L_EE],    origin_orientation=[0,0,0], rotation=[0,0,0], bounds=(0, 0)),
             ],
@@ -254,7 +254,7 @@ def solve_ik(xyz: list, current_joints: list = None) -> tuple:
 
 
 # Joint bounds (radians) — mirror MOVEO_CHAIN link bounds above
-_JOINT_BOUNDS = [(-2.00, 2.40), (-1.95, 1.95), (-2.20, 2.20), (-3.14, 3.14), (-1.75, 1.75)]
+_JOINT_BOUNDS = [(-2.00, 2.40), (-1.95, 1.95), (-2.20, 2.20), (-3.14, 3.14), (-1.60, 1.60)]
 # Table geometry: 14 cm tall, 13 cm radius.
 # Two-zone floor rule:
 #   r <= TABLE_RADIUS  →  EE must stay above the table top (TABLE_HEIGHT)
