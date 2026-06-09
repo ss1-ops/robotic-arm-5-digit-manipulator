@@ -146,13 +146,19 @@ void joint_state_callback(const void* msgin) {
     float steps = steps_arr[i];
     dynamic_speed_factor[i] = (steps >= 1.0f) ? (time_arr[i] / max_time) : 1.0f;
 
-    // Ramp reset: if mid-move, skip re-acceleration by starting at peak velocity.
-    if (steps >= 1.0f) {
-      bool was_moving = (ramp_done[i] < ramp_total[i] * 0.99f);
-      ramp_total[i] = steps;
-      ramp_done[i]  = was_moving ? (steps * 0.5f) : 0.0f;
+    // Only disturb ramp state when the target actually changes.
+    // Re-publishes of the same target (from the Pi's 0.5s keepalive) must NOT
+    // reset ramp_done — doing so kicks the motor out of the decel zone every
+    // 0.5s, causing overshoot and the arm to bounce back and forth near the
+    // target. If the target is unchanged, just leave the ramp running.
+    if (fabsf(tgt - target_pos[i]) * steps_per_rad[i] >= 2.0f) {
+      if (steps >= 1.0f) {
+        bool was_moving = (ramp_done[i] < ramp_total[i] * 0.99f);
+        ramp_total[i] = steps;
+        ramp_done[i]  = was_moving ? (steps * 0.5f) : 0.0f;
+      }
+      target_pos[i] = tgt;
     }
-    target_pos[i] = tgt;
   }
 }
 

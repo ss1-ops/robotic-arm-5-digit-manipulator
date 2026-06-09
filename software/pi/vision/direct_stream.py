@@ -15,11 +15,67 @@ Run:
 
 import argparse
 import http.server
+import os
 import socketserver
 import threading
 import time
 
 import cv2
+
+# Names (substrings, case-insensitive) that identify the ELP stereo camera.
+_CAMERA_NAMES = ["3d usb camera", "elp", "32e4"]
+
+
+def _find_camera(name_hints: list[str] = _CAMERA_NAMES, retries: int = 5, retry_delay: float = 1.5) -> int:
+    """Scan /sys/class/video4linux to find the stereo camera device index.
+
+    Matches any video node whose sysfs name contains one of name_hints, then
+    probes each candidate with OpenCV to confirm it can actually deliver frames.
+    Retries to handle USB devices that appear in sysfs before they are ready
+    to stream (common on boot or after re-plug).
+    Returns the first working device index, or -1 if none found.
+    """
+    base = "/sys/class/video4linux"
+
+    for attempt in range(retries):
+        candidates = []
+        try:
+            nodes = sorted(os.listdir(base), key=lambda n: int(n.replace("video", "") or -1))
+        except Exception:
+            return -1
+
+        for node in nodes:
+            name_path = os.path.join(base, node, "name")
+            try:
+                with open(name_path) as f:
+                    dev_name = f.read().strip().lower()
+            except OSError:
+                continue
+            if any(hint in dev_name for hint in name_hints):
+                try:
+                    idx = int(node.replace("video", ""))
+                except ValueError:
+                    continue
+                candidates.append((idx, dev_name))
+
+        for idx, dev_name in candidates:
+            cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+            if not cap.isOpened():
+                cap.release()
+                continue
+            ok, _ = cap.read()
+            cap.release()
+            if ok:
+                print(f"camera scan: found '{dev_name}' at /dev/video{idx}", flush=True)
+                return idx
+            print(f"camera scan: /dev/video{idx} opened but no frame yet, retrying...", flush=True)
+
+        if attempt < retries - 1:
+            print(f"camera scan: attempt {attempt+1}/{retries} failed, waiting {retry_delay}s...", flush=True)
+            time.sleep(retry_delay)
+
+    print(f"camera scan: no working device found after {retries} attempts", flush=True)
+    return -1
 
 _LATEST: dict[str, bytes | None] = {"preview": None, "left": None, "right": None}
 _LOCK = threading.Lock()
@@ -149,7 +205,8 @@ def _capture_loop(cap, preview_scale: float, preview_quality: int, proc_quality:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--device",          type=int,   default=0)
+    ap.add_argument("--device",          type=int,   default=-1,
+                    help="V4L2 device index; -1 = auto-scan by camera name (default)")
     ap.add_argument("--width",           type=int,   default=2560)
     ap.add_argument("--height",          type=int,   default=960)
     ap.add_argument("--fps",             type=int,   default=30)
@@ -159,7 +216,16 @@ def main():
     ap.add_argument("--proc-quality",    type=int,   default=85)
     args = ap.parse_args()
 
-    cap = _open_camera(args.device, args.width, args.height, args.fps)
+    device = args.device
+    if device < 0:
+        device = _find_camera()
+        if device < 0:
+            raise RuntimeError(
+                "camera auto-scan failed — no matching device found. "
+                "Check `lsusb | grep 32e4` and `ls /dev/video*`"
+            )
+
+    cap = _open_camera(device, args.width, args.height, args.fps)
 
     threading.Thread(
         target=_capture_loop,

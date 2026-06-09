@@ -51,17 +51,16 @@ if _IKPY_AVAILABLE:
         links=[
             OriginLink(),
             # J1: waist yaw about +Z. Positive (RH rule, Z up) is CCW viewed from above.
-            # At j1=0 the arm bend plane is aligned with +X_model; +j1 yaws the
-            # reach direction toward +Y_model.
+            # At j1=0 the reach plane is the X-Z plane; +j1 yaws the arm toward +Y (left).
             URDFLink("j1", origin_translation=[0, 0, L_BASE],  origin_orientation=[0,0,0], rotation=[0,0,1], bounds=(-2.00, 2.40)),
             # J2: shoulder pitch about +Y. At home (j2=0) upper arm points straight up +Z.
-            # Positive rotation (RH about +Y) bends the upper arm forward toward +X_model.
+            # Positive j2 (RH about +Y) bends the arm forward toward +X (forward).
             URDFLink("j2", origin_translation=[0, 0, L_WAIST], origin_orientation=[0,0,0], rotation=[0,1,0], bounds=(-1.95, 1.95)),
-            # J3: elbow pitch about +Y. Positive bends the forearm toward +X_model (in the plane set by j1).
+            # J3: elbow pitch about +Y. Positive bends the forearm toward +X.
             URDFLink("j3", origin_translation=[0, 0, L_UPPER], origin_orientation=[0,0,0], rotation=[0,1,0], bounds=(-2.20, 2.20)),
-            # J4: wrist roll about local Z (forearm twist). Positive follows RH with local Z.
+            # J4: wrist roll about local Z (forearm twist).
             URDFLink("j4", origin_translation=[0, 0, L_FORE],  origin_orientation=[0,0,0], rotation=[0,0,1], bounds=(-3.14, 3.14)),
-            # J5: wrist pitch about +Y. Positive bends the tip toward +X_model in the local forearm frame.
+            # J5: wrist pitch about +Y. Positive bends the tip toward +X in the local forearm frame.
             URDFLink("j5", origin_translation=[0, 0, L_WRIST], origin_orientation=[0,0,0], rotation=[0,1,0], bounds=(-1.75, 1.75)),
             # End effector (passive) — extends along previous Z at zero pose.
             URDFLink("ee", origin_translation=[0, 0, L_EE],    origin_orientation=[0,0,0], rotation=[0,0,0], bounds=(0, 0)),
@@ -78,40 +77,36 @@ MAX_REACH = _MAX_REACH  # public alias for importers
 def chain_to_user(p):
     """Convert from internal ikpy *model* frame to final public user frame.
 
-    The user frame is the model rotated 180° about Z:
-        user = (-x_model, -y_model, z)
+    The model and user frames are aligned (identity transform):
+        user = (x_model, y_model, z)
     This is the single coordinate system used by all higher-level code
     (GUI targets, IK, vision, logs, Compute FK, etc.).
-    Matches physical description:
-      - positive J2/J3/J5 bend toward +X in model → -X in user
-      - positive J1 yaws toward +Y in model → -Y in user
+    Physical description:
+      - positive J2/J3/J5 bend toward +X in model → +X in user (forward)
+      - positive J1 yaws CCW (viewed from above) toward +Y in model → +Y in user (left)
     """
     x, y, z = p
-    return -float(x), -float(y), float(z)
+    return float(x), float(y), float(z)
 
 
 def user_to_chain(p):
     """Convert from final public user frame to internal ikpy *model* frame.
 
-    (180° Z is self-inverse.)
+    Identity (model and user frames are aligned).
     """
     x, y, z = p
-    return -float(x), -float(y), float(z)
+    return float(x), float(y), float(z)
 
 
 def forward_kinematics(joints):
     """Return (x, y, z) in metres for the end-effector given [j1..j5] in radians.
 
-    Public coordinates are in the final *user frame* (REP-103 +X forward,
-    +Y left, +Z up), which is the internal ikpy model frame rotated 180° about Z.
+    Coordinates are in the user frame (+X forward, +Y left, +Z up), which is
+    identical to the internal ikpy model frame (identity transform):
+        positive J2/J3/J5 (J1=J4=0) bend toward +X (forward)
+        positive J1 yaws CCW (viewed from above) toward +Y (left)
 
-    In the *internal model* (how the Chain/joints are defined):
-        positive J2/J3/J5 (J1=J4=0) bend toward +X_model
-        positive J1 yaws CCW toward +Y_model
-    After the 180° Z rotation the public user values are (-x_model, -y_model, z).
-
-    All callers (GUI cartesian/IK targets, vision estimated/approaching, Compute FK,
-    logs, depth points after T @ CAM_T) use/see the final user frame.
+    All callers (GUI cartesian/IK targets, vision, Compute FK, logs) use this frame.
     """
     if not _IKPY_AVAILABLE or MOVEO_CHAIN is None:
         raise RuntimeError("ikpy is not installed")

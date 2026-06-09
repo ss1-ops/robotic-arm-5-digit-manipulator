@@ -149,14 +149,11 @@ def solve_ik(xyz: list, current_joints: list = None) -> tuple:
             f"exceeds max reach {_MAX_REACH:.3f}m"
         )
 
-    # J1: waist azimuth toward target. At j1=0 the arm's reach plane points to
-    # +Y (positive reach swings the tip toward +Y), so the reach DIRECTION is at
-    # azimuth +90°. To aim it straight at the target we must offset the target
-    # azimuth by -90°. Without this offset the seed is 90° off and the optimizer
-    # drifts to the "reach-behind" branch (waist ~+90° + 180° wrist roll), which
-    # physically looks like the arm bending backward for +X targets.
+    # J1: waist azimuth toward target. J2 rotates about +Y, so at j1=0 the arm's
+    # reach direction is along +X (azimuth 0°). No offset needed: j1_aim is just
+    # the azimuth of the target in the model frame.
     if abs(x) > 1e-4 or abs(y) > 1e-4:
-        j1_aim = _math.atan2(y, x) - _math.pi / 2.0
+        j1_aim = _math.atan2(y, x)
         # wrap to (-pi, pi] then clamp to the reachable waist range
         j1_aim = (j1_aim + _math.pi) % (2 * _math.pi) - _math.pi
         j1_guess = max(-2.00, min(2.40, j1_aim))
@@ -353,10 +350,10 @@ class JointPublisherNode(Node):
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.name     = JOINT_NAMES
         msg.position = [float(a) for a in angles]
-        self._pub.publish(msg)
         with self._joints_lock:
             self._last_joints = list(msg.position)
         self._has_command = True
+        self._pub.publish(msg)
         self.get_logger().info(f"published {[f'{a:.3f}' for a in angles]}")
 
     def publish_home(self):
@@ -421,9 +418,13 @@ def serve(node: JointPublisherNode):
                             conn.sendall(b'{"ok":true}\n')
                         # Cartesian IK command: {"cartesian": [x, y, z]}  (metres)
                         elif "cartesian" in data:
+                            xyz_req = list(data["cartesian"])
+                            if xyz_req[2] < 0.02:
+                                print(f"[socket] Z floor clamp: {xyz_req[2]:.3f} → 0.020 m", flush=True)
+                                xyz_req[2] = 0.02
                             with node._joints_lock:
                                 curr = list(node._last_joints)
-                            angles, fk_err_mm = solve_ik(data["cartesian"], curr)
+                            angles, fk_err_mm = solve_ik(xyz_req, curr)
                             ok, reason = check_collision(angles)
                             if not ok:
                                 raise ValueError(f"collision/limit: {reason}")

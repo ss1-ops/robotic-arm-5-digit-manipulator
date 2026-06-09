@@ -50,18 +50,19 @@ if _IKPY_AVAILABLE:
         active_links_mask=[False, True, True, True, True, True, False],
         links=[
             OriginLink(),
-            # J1: waist — rotates about Z (yaw, swings arm left/right in X-Y plane)
+            # J1: waist yaw about +Z. Positive (RH rule, Z up) is CCW viewed from above.
+            # At j1=0 the reach plane is the X-Z plane; +j1 yaws the arm toward +Y (left).
             URDFLink("j1", origin_translation=[0, 0, L_BASE],  origin_orientation=[0,0,0], rotation=[0,0,1], bounds=(-2.00, 2.40)),
-            # J2: shoulder — rotates about X (pitch, swings upper arm in Y-Z plane)
-            #   At home (j2=0) upper arm points straight up along +Z
-            URDFLink("j2", origin_translation=[0, 0, L_WAIST], origin_orientation=[0,0,0], rotation=[1,0,0], bounds=(-1.95, 1.95)),
-            # J3: elbow — upper arm length along Z; rotates about X
-            URDFLink("j3", origin_translation=[0, 0, L_UPPER], origin_orientation=[0,0,0], rotation=[1,0,0], bounds=(-2.20, 2.20)),
-            # J4: wrist roll — forearm length along Z; rotates about Z (roll)
+            # J2: shoulder pitch about +Y. At home (j2=0) upper arm points straight up +Z.
+            # Positive j2 (RH about +Y) bends the arm forward toward +X (forward).
+            URDFLink("j2", origin_translation=[0, 0, L_WAIST], origin_orientation=[0,0,0], rotation=[0,1,0], bounds=(-1.95, 1.95)),
+            # J3: elbow pitch about +Y. Positive bends the forearm toward +X.
+            URDFLink("j3", origin_translation=[0, 0, L_UPPER], origin_orientation=[0,0,0], rotation=[0,1,0], bounds=(-2.20, 2.20)),
+            # J4: wrist roll about local Z (forearm twist).
             URDFLink("j4", origin_translation=[0, 0, L_FORE],  origin_orientation=[0,0,0], rotation=[0,0,1], bounds=(-3.14, 3.14)),
-            # J5: wrist pitch — rotates about X. WRIST segment before the pitch pivot.
-            URDFLink("j5", origin_translation=[0, 0, L_WRIST], origin_orientation=[0,0,0], rotation=[1,0,0], bounds=(-1.75, 1.75)),
-            # End effector (passive) — extends along previous Z
+            # J5: wrist pitch about +Y. Positive bends the tip toward +X in the local forearm frame.
+            URDFLink("j5", origin_translation=[0, 0, L_WRIST], origin_orientation=[0,0,0], rotation=[0,1,0], bounds=(-1.75, 1.75)),
+            # End effector (passive) — extends along previous Z at zero pose.
             URDFLink("ee", origin_translation=[0, 0, L_EE],    origin_orientation=[0,0,0], rotation=[0,0,0], bounds=(0, 0)),
         ],
     )
@@ -73,53 +74,56 @@ _MAX_REACH = L_UPPER + L_FORE + L_WRIST + L_EE
 MAX_REACH = _MAX_REACH  # public alias for importers
 
 
+def chain_to_user(p):
+    """Convert from internal ikpy *model* frame to final public user frame.
+
+    The model and user frames are aligned (identity transform):
+        user = (x_model, y_model, z)
+    This is the single coordinate system used by all higher-level code
+    (GUI targets, IK, vision, logs, Compute FK, etc.).
+    Physical description:
+      - positive J2/J3/J5 bend toward +X in model → +X in user (forward)
+      - positive J1 yaws CCW (viewed from above) toward +Y in model → +Y in user (left)
+    """
+    x, y, z = p
+    return float(x), float(y), float(z)
+
+
+def user_to_chain(p):
+    """Convert from final public user frame to internal ikpy *model* frame.
+
+    Identity (model and user frames are aligned).
+    """
+    x, y, z = p
+    return float(x), float(y), float(z)
+
+
 def forward_kinematics(joints):
     """Return (x, y, z) in metres for the end-effector given [j1..j5] in radians.
 
-    The returned coordinates are in the *user command frame*:
-        +X = forward, +Y = left, +Z = up  (REP-103 style, matching what you
-        pass to cartesian commands and see in the controller "target x=..." logs).
+    Coordinates are in the user frame (+X forward, +Y left, +Z up), which is
+    identical to the internal ikpy model frame (identity transform):
+        positive J2/J3/J5 (J1=J4=0) bend toward +X (forward)
+        positive J1 yaws CCW (viewed from above) toward +Y (left)
 
-    All higher-level code (position estimation, targets for IK, GUI display, etc.)
-    should stay in this user frame.
-
-    The internal ikpy MOVEO_CHAIN uses a 90° rotated convention (its primary
-    reach plane is along +Y in chain coords when j1=0). The wrapper below
-    (and the one inside solve_ik) handles the conversion so callers don't have to.
+    All callers (GUI cartesian/IK targets, vision, Compute FK, logs) use this frame.
     """
     if not _IKPY_AVAILABLE or MOVEO_CHAIN is None:
         raise RuntimeError("ikpy is not installed")
     full = [0.0] + list(joints) + [0.0]
     fk = MOVEO_CHAIN.forward_kinematics(full)
-    cx, cy, cz = fk[0, 3], fk[1, 3], fk[2, 3]
-    return chain_to_user((cx, cy, cz))
-
-
-def chain_to_user(p):
-    """Convert point from internal ikpy chain frame → user frame."""
-    cx, cy, cz = p
-    # The IK side does: user(x,y) -> internal(-y, x)
-    # This makes positive user-Y (left) map to the chain's positive reach direction
-    # consistently with the j1 positive yaw direction.
-    # Inverse of that:
-    return cy, -cx, cz
-
-
-def user_to_chain(p):
-    """Convert point from user frame → internal ikpy chain frame."""
-    x, y, z = p
-    return -y, x, z
+    return chain_to_user((float(fk[0, 3]), float(fk[1, 3]), float(fk[2, 3])))
 
 
 def forward_kinematics_matrix(joints):
     """Return the 4x4 homogeneous EE transform matrix given [j1..j5] radians.
 
-    The *translation* part of this matrix is expressed in the internal chain frame.
-    Use this (via mp.forward_kinematics_matrix) when transforming points that live
-    in the model frame (camera offsets defined in URDF/chain coords, depth points
-    from reprojectImageTo3D in left camera frame, etc.). After the 4x4 transform,
-    convert the resulting position vector with chain_to_user if you need it in
-    the user frame for targets/logs/etc.
+    The matrix (translation + orientation) is in the *internal model frame*
+    (the frame the ikpy Chain and joint axes are defined in).
+    Use this for transforming points defined relative to the EE in the model
+    (e.g. CAM_T, depth rays in camera->EE), then convert the resulting base point
+    with chain_to_user() to get final user-frame coordinates.
+    The public forward_kinematics() already returns user-frame points (model rotated 180° about Z).
     """
     if not _IKPY_AVAILABLE or MOVEO_CHAIN is None:
         raise RuntimeError("ikpy is not installed")

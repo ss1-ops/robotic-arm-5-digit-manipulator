@@ -7,7 +7,7 @@ cd "$HOME/vision" || exit 1
 pkill -9 -f "direct_stream|stereo_camera_node|stereo_depth_node|hand_eye_calibrate|mjpeg_stream" 2>/dev/null
 sleep 1
 
-setsid python3 direct_stream.py --device 1 >/tmp/cam.log 2>&1 </dev/null &
+setsid python3 direct_stream.py >/tmp/cam.log 2>&1 </dev/null &
 sleep 3
 
 pgrep -f direct_stream > /dev/null \

@@ -238,10 +238,10 @@ class Worker(QObject):
                 resp = json.loads(ack_buf.strip())
                 if resp.get("ok"):
                     if "angles" in resp:
-                        degs = ", ".join(f"{math.degrees(a):.1f}°" for a in resp["angles"])
+                        rads = ", ".join(f"{a:.3f}" for a in resp["angles"])
                         fk_mm = resp.get("fk_err_mm")
                         suffix = f" (err {fk_mm:.1f}mm)" if fk_mm is not None else ""
-                        self.log.emit(f"[IK] joints: {degs}{suffix}")
+                        self.log.emit(f"[IK] joints: {rads} rad{suffix}")
                         if "achieved" in resp:
                             ach = resp["achieved"]
                             self.log.emit(f"[IK] achieved (solver model) x={ach[0]:.3f} y={ach[1]:.3f} z={ach[2]:.3f} m")
@@ -419,6 +419,8 @@ class ClickableLabel(QLabel):
 
 # ── Main window ───────────────────────────────────────────────────────────────
 class MainWindow(QMainWindow):
+    _log_signal = pyqtSignal(str)   # thread-safe log: emit from any thread
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Moveo Arm — Simple Controller")
@@ -428,6 +430,7 @@ class MainWindow(QMainWindow):
         self._worker.log.connect(self._append_log)
         self._worker.status.connect(self._on_status)
         self._worker.angles_update.connect(self._on_ik_angles)
+        self._log_signal.connect(self._append_log)
 
         self._angles    = [0.0] * 5
         self._speed_pct = 100       # 1–100 %
@@ -509,37 +512,6 @@ class MainWindow(QMainWindow):
         fkh.addStretch()
         vlay.addWidget(fk_box)
 
-        # ── Vision Approach (full offload to Mac, same as old Pi goto_object) ────
-        vision_box = QGroupBox("Vision Approach (Mac offload — full port)")
-        vv = QVBoxLayout(vision_box)
-        note = QLabel("Pi only streams camera + executes commands. Mac does blob, SGBM depth, pose, IK target, j5 aim. Click 'Start' after jogging + 'Send All Joints'.")
-        note.setWordWrap(True)
-        vv.addWidget(note)
-        h = QHBoxLayout()
-        self._vision_standoff = QDoubleSpinBox()
-        self._vision_standoff.setRange(0.05, 0.40)
-        self._vision_standoff.setValue(0.22)
-        self._vision_standoff.setSingleStep(0.01)
-        h.addWidget(QLabel("Standoff (m):"))
-        h.addWidget(self._vision_standoff)
-        self._vision_h_lo = QSpinBox(); self._vision_h_lo.setRange(0,179); self._vision_h_lo.setValue(0)
-        self._vision_h_hi = QSpinBox(); self._vision_h_hi.setRange(0,179); self._vision_h_hi.setValue(179)
-        self._vision_s = QSpinBox(); self._vision_s.setRange(0,255); self._vision_s.setValue(80)
-        self._vision_v = QSpinBox(); self._vision_v.setRange(0,255); self._vision_v.setValue(80)
-        h.addWidget(QLabel("HSV (lo-hi, s, v):"))
-        h.addWidget(self._vision_h_lo); h.addWidget(self._vision_h_hi)
-        h.addWidget(self._vision_s); h.addWidget(self._vision_v)
-        vv.addLayout(h)
-        bh = QHBoxLayout()
-        self._btn_vision = QPushButton("Start Approach (Mac offload)")
-        self._btn_vision.clicked.connect(self._start_vision_offload)
-        bh.addWidget(self._btn_vision)
-        stopv = QPushButton("Stop")
-        stopv.clicked.connect(lambda: setattr(self, '_vision_stop', True))
-        bh.addWidget(stopv)
-        vv.addLayout(bh)
-        vlay.addWidget(vision_box)
-
         self._vision_stop = False
 
         # Speed control
@@ -596,6 +568,12 @@ class MainWindow(QMainWindow):
         )
         self._btn_set_home.clicked.connect(self._set_as_home)
 
+        self._vision_standoff = QDoubleSpinBox()
+        self._vision_standoff.setRange(0.05, 0.40)
+        self._vision_standoff.setValue(0.22)
+        self._vision_standoff.setSingleStep(0.01)
+        self._vision_standoff.setToolTip("Standoff distance for click-to-go approach (metres)")
+
         self._btn_stop_approach = QPushButton("✋ Stop Approach")
         self._btn_stop_approach.setToolTip("Stop the click-to-go visual approach")
         self._btn_stop_approach.clicked.connect(self._stop_approach)
@@ -610,6 +588,8 @@ class MainWindow(QMainWindow):
         action_row.addWidget(self._btn_home)
         action_row.addWidget(self._btn_set_home)
         action_row.addStretch()
+        action_row.addWidget(QLabel("Standoff (m):"))
+        action_row.addWidget(self._vision_standoff)
         action_row.addWidget(self._btn_stop_approach)
         action_row.addWidget(self._btn_estop)
         vlay.addLayout(action_row)
@@ -940,21 +920,6 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._fk_label.setText(f"FK error: {e}")
 
-    def _start_vision_offload(self):
-        if not self._worker.connected or self._estop:
-            self._append_log("[approach] not connected or E-STOP active"); return
-        lo = [self._vision_h_lo.value(), self._vision_s.value(), self._vision_v.value()]
-        hi = [self._vision_h_hi.value(), 255, 255]
-        standoff = self._vision_standoff.value()
-        self._vision_stop = False
-        self._append_log(f"[approach] Mac offload (manual HSV) → lo={lo} hi={hi}  standoff={standoff*100:.0f}cm")
-        angles = [self._sliders[i].value() / SLIDER_SCALE for i in range(len(JOINTS))]
-        threading.Thread(
-            target=self._run_offload_approach,
-            args=(lo, hi, angles, standoff),
-            daemon=True,
-        ).start()
-
     def _run_offload_approach(self, lo, hi, angles, standoff):
         gui_dir = os.path.dirname(os.path.abspath(__file__))
         vision_dir = os.path.join(os.path.dirname(gui_dir), "vision")
@@ -966,7 +931,7 @@ class MainWindow(QMainWindow):
             self._append_log(f"[approach] import failed: {e}"); return
 
         def log(msg):
-            self._append_log(f"[approach] {msg}")
+            self._log_signal.emit(f"[approach] {msg}")
 
         def send_j(q):
             if self._vision_stop:
@@ -1022,11 +987,11 @@ class MainWindow(QMainWindow):
             )
             approach.run()
         except RuntimeError as e:
-            self._append_log(f"[approach] {e}")
+            self._log_signal.emit(f"[approach] {e}")
         except Exception as e:
-            self._append_log(f"[approach] error: {e}")
+            self._log_signal.emit(f"[approach] error: {e}")
         finally:
-            self._append_log("[approach] finished")
+            self._log_signal.emit("[approach] finished")
 
     def _set_as_home(self):
         """Declare current physical position as home — zeros ESP32 counters without moving."""

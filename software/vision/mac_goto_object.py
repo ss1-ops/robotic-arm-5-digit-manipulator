@@ -306,7 +306,7 @@ class MacGotoObject:
         if float(np.linalg.norm(aim)) < 0.01:
             return q_ik
         aim_dir = aim / np.linalg.norm(aim)
-        j5_axis = R[:, 0]
+        j5_axis = R[:, 1]
         cur_z = R[:, 2]
         def proj(v):
             p = v - float(np.dot(v, j5_axis)) * j5_axis
@@ -348,7 +348,7 @@ class MacGotoObject:
             self._send_joints(q)
             self._measure_px()
             if fp is None:
-                print(f"ERROR: lost target during probe j{ji+1}")
+                self.log(f"ERROR: lost target during probe j{ji+1}")
                 return
             J[:, k] = (fp - f0) / self.jog
 
@@ -357,14 +357,14 @@ class MacGotoObject:
         for it in range(self.max_center):
             f = self._measure_px()
             if f is None:
-                print(f"centering [{it}]: target lost")
+                self.log(f"centering [{it}]: target lost")
                 continue
             if f_prev is not None and dq_prev is not None:
                 den = float(dq_prev @ dq_prev)
                 if den > 1e-6:
                     J = J + np.outer((f - f_prev) - (J @ dq_prev), dq_prev) / den
             e = f
-            print(f"centering [{it}]: dx={f[0]:+.0f} dy={f[1]:+.0f} px")
+            self.log(f"centering [{it}]: dx={f[0]:+.0f} dy={f[1]:+.0f} px")
             if np.linalg.norm(e) < self.center_tol:
                 centered = True
                 break
@@ -380,23 +380,35 @@ class MacGotoObject:
             f_prev, dq_prev = f.copy(), dq.copy()
 
         if not centered:
-            print(f"WARNING: could not fully center in {self.max_center} steps")
-        print(f"Centered at joints: {np.round(q, 3)}")
+            self.log(f"WARNING: could not fully center in {self.max_center} steps")
+        self.log(f"Centered at joints: {np.round(q, 3)}")
 
-        # Phase 2: depth
-        print("Measuring depth...")
-        z_m, x_n, y_n = self._measure_depth()
-        if z_m is None:
-            print("ERROR: depth measurement failed")
-            return
-        print(f"Depth: {z_m*100:.1f} cm")
-
-        # Phase 3: object pose + approach target
+        # Phase 2: depth — retry if the resulting world-Z is implausibly low
         T = self._fk_base_ee(q)
-        obj_ee = CAM_T + np.array([x_n * z_m, y_n * z_m, z_m])
-        obj_base = (T @ np.append(obj_ee, 1.0))[:3]
+        _FLOOR_Z   = -0.05   # world Z below this means depth is bogus
+        _MAX_RETRY = 3
+        z_m = x_n = y_n = obj_base = None
+        for _attempt in range(_MAX_RETRY):
+            self.log(f"Measuring depth{'' if _attempt == 0 else f' (retry {_attempt})'}...")
+            z_m, x_n, y_n = self._measure_depth()
+            if z_m is None:
+                self.log("ERROR: depth measurement failed")
+                return
+            _obj_ee   = CAM_T + np.array([x_n * z_m, y_n * z_m, z_m])
+            _obj_base = (T @ np.append(_obj_ee, 1.0))[:3]
+            _obj_z    = self._to_user(_obj_base)[2]
+            self.log(f"Depth: {z_m*100:.1f} cm  →  world Z={_obj_z:.3f} m")
+            if _obj_z >= _FLOOR_Z:
+                obj_base = _obj_base
+                break
+            self.log(f"WARNING: world Z={_obj_z:.3f} m < {_FLOOR_Z} m — depth reading bogus, retrying...")
+        if obj_base is None:
+            self.log(f"ERROR: depth sanity check failed after {_MAX_RETRY} attempts — aborting")
+            return
+
+        obj_ee  = CAM_T + np.array([x_n * z_m, y_n * z_m, z_m])
         obj_user = self._to_user(obj_base)
-        print(f"Target (user frame): {np.round(obj_user, 3)} m")
+        self.log(f"Target (user frame): {np.round(obj_user, 3)} m")
 
         tgt_ee = CAM_T + np.array([x_n * z_m, y_n * z_m, max(0.05, z_m - self.standoff)])
         tgt_base = (T @ np.append(tgt_ee, 1.0))[:3]
@@ -405,24 +417,19 @@ class MacGotoObject:
         dist_reach = float(np.linalg.norm(vec))
         if dist_reach > self.max_reach:
             tgt_base = ref + vec * (self.max_reach / dist_reach)
-            print("WARNING: clamped to max reach")
+            self.log("WARNING: clamped to max reach")
         tgt_user = self._to_user(tgt_base)
-        print(f"Approach target (user): {np.round(tgt_user, 3)} m  standoff={self.standoff*100:.0f}cm")
+        self.log(f"Approach target (user): {np.round(tgt_user, 3)} m  standoff={self.standoff*100:.0f}cm")
 
-        # Send cartesian — Pi does IK (warm starts from its current joints)
-        print("Sending cartesian target to Pi for IK...")
-        ik_angles = self._send_cartesian(tgt_user)
+        # Send cartesian — Pi does IK (warm-started from current joints for continuity)
+        self.log("Sending cartesian target to Pi for IK...")
+        ik_angles = list(self._send_cartesian(tgt_user))
+        self.log(f"IK angles: {np.round(ik_angles, 3)}")
 
-        # Apply the same constraints the Pi version used (j1/j2 from viewing pose, j4=0)
-        ik_angles = list(ik_angles)
-        ik_angles[0] = float(q[0])
-        ik_angles[1] = float(q[1])
-        ik_angles[3] = 0.0
-        print(f"Constrained IK angles: {np.round(ik_angles, 3)}")
-
-        # j5 aim
+        # Aim J5 so camera Z points toward the object center
         ik_aimed = self._aim_j5(ik_angles, obj_base)
-        print(f"Final aimed joints: {np.round(ik_aimed, 3)}")
+        if ik_aimed[4] != ik_angles[4]:
+            self.log(f"J5 aimed: {ik_angles[4]:.3f} → {ik_aimed[4]:.3f} rad")
 
         # Send the move
         self._send_joints(ik_aimed)
@@ -431,11 +438,11 @@ class MacGotoObject:
         # Verify
         f = self._measure_px()
         if f is None:
-            print("Verify: target not visible after move")
+            self.log("Verify: target not visible after move")
         else:
-            print(f"Verify residual: dx={f[0]:+.0f} dy={f[1]:+.0f} px")
+            self.log(f"Verify residual: dx={f[0]:+.0f} dy={f[1]:+.0f} px")
 
-        print("=== Mac goto_object finished ===")
+        self.log("=== Mac goto_object finished ===")
         try:
             self._sock.close()
         except:
