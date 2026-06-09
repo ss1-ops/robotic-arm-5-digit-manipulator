@@ -38,3 +38,28 @@ source /opt/ros/jazzy/setup.bash && ros2 topic info /joint_commands
 ```bash
 source /opt/ros/jazzy/setup.bash && ros2 topic pub --once /manual_joint_command std_msgs/msg/String "data: '[0.5, 0.0, 0.0, 0.0, 0.0]'"
 ```
+
+## Foxglove (visualization)
+Foxglove bridge is running via systemd on port 8765 and exposing all topics (/joint_states, /joint_commands, stereo cameras, /ee_target, etc).
+
+On your Mac (Foxglove Studio desktop app from foxglove.dev):
+- Open connection → WebSocket → `ws://armpi.local:8765` (or `ws://192.168.1.142:8765`)
+- Add **3D** panel: set "URDF" to topic `/robot_description`; it will drive from `/joint_states` (Joint_1..Joint_5 names).
+- Add **Image** panels for `/stereo/left/image_raw` and right.
+- Add **Raw Messages** or **Plot** for joints/commands.
+
+Live `/joint_states` (for viz) is published by `moveo_publisher` (timer + mirrors external `/joint_commands` pubs and TCP cmds). The `foxglove_ee_to_joint_states` node (if `/ee_target` published) uses MoveIt IK for alternative EE-driven state.
+
+Optional (for IK/EE target path in Foxglove):
+```bash
+ssh armpi@armpi.local 'source /opt/ros/jazzy/setup.bash && source ~/moveo_ws/install/setup.bash && export FASTDDS_BUILTIN_TRANSPORTS=UDPv4 && ros2 launch moveo_moveit_config moveit.launch.py'
+```
+(Starts `/move_group` providing `/compute_ik`; the ee node will then react to `/ee_target`.)
+
+To start rsp (for /tf if other nodes need it):
+```bash
+ssh armpi@armpi.local 'source /opt/ros/jazzy/setup.bash && source ~/moveo_ws/install/setup.bash && export FASTDDS_BUILTIN_TRANSPORTS=UDPv4 && ros2 launch moveo_description moveo_description.launch.py'
+```
+(Note: also starts controller_manager bits; harmless for viz but check logs.)
+
+See also: `~/ros_nodes/foxglove_ee_to_joint_states.py`, moveo_publisher.py (now publishes + mirrors state), and the moveo_moveit_config / moveo_description packages in ~/moveo_ws/src.

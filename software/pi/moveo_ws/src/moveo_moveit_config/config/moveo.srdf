@@ -1,0 +1,21 @@
+<?xml version="1.0" ?>
+<robot name="moveo">
+
+  <group name="arm">
+    <chain base_link="base_link" tip_link="Link_5"/>
+  </group>
+
+  <group_state name="home" group="arm">
+    <joint name="Joint_1" value="0"/>
+    <joint name="Joint_2" value="0"/>
+    <joint name="Joint_3" value="0"/>
+    <joint name="Joint_4" value="0"/>
+    <joint name="Joint_5" value="0"/>
+  </group_state>
+
+  <disable_collisions link1="base_link" link2="Link_1" reason="Adjacent"/>
+  <disable_collisions link1="Link_1"    link2="Link_2" reason="Adjacent"/>
+  <disable_collisions link1="Link_2"    link2="Link_3" reason="Adjacent"/>
+  <disable_collisions link1="Link_3"    link2="Link_4" reason="Adjacent"/>
+  <disable_collisions link1="Link_4"    link2="Link_5" reason="Adjacent"/>
+</robot>

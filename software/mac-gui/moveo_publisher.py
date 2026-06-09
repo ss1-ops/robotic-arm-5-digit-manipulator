@@ -30,6 +30,33 @@ except ImportError:
     _IKPY_AVAILABLE = False
     print("[IK] ikpy not installed — cartesian commands disabled. Run: pip3 install ikpy", flush=True)
 
+# Use the pure kinematics module (no ROS deps) so the Mac GUI can import the chain
+# without pulling in rclpy.
+# kinematics.py is the SINGLE SOURCE OF TRUTH for lengths + Chain (see that file).
+try:
+    from kinematics import (
+        MOVEO_CHAIN,
+        _IKPY_AVAILABLE as _KINEMATICS_IKPY,
+        forward_kinematics as _kinematics_fk,  # user-frame (same as IK targets)
+        # Import lengths under the _L_ names that the local solve_ik / reach code expects.
+        L_BASE as _L_BASE,
+        L_WAIST as _L_WAIST,
+        L_UPPER as _L_UPPER,
+        L_FORE as _L_FORE,
+        L_WRIST as _L_WRIST,
+        L_EE as _L_EE,
+        MAX_REACH as _MAX_REACH,
+    )
+    # Re-export for code that expects the old names
+    if not _IKPY_AVAILABLE:
+        _IKPY_AVAILABLE = _KINEMATICS_IKPY
+except Exception:
+    MOVEO_CHAIN = None
+    _IKPY_AVAILABLE = False
+    forward_kinematics = None
+    _L_BASE = _L_WAIST = _L_UPPER = _L_FORE = _L_WRIST = _L_EE = 0.0
+    _MAX_REACH = 0.0
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
@@ -37,43 +64,9 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Float32
 
 JOINT_NAMES = ["j1", "j2", "j3", "j4", "j5"]
+JOINT_NAMES_LONG = ["Joint_1", "Joint_2", "Joint_3", "Joint_4", "Joint_5"]
 TCP_HOST    = "0.0.0.0"
 TCP_PORT    = 9000
-
-# ── Moveo kinematic chain ──────────────────────────────────────────────────────
-# Link lengths in METRES — measure from your physical arm and update these.
-# Current values are approximate for the BCN3D Moveo / AR2 geometry.
-_L_BASE  = 0.230   # base plate to shoulder pivot (vertical)
-_L_UPPER = 0.228   # shoulder to elbow pivot (upper arm)
-_L_FORE  = 0.235   # elbow to wrist pitch pivot (forearm)
-_L_EE    = 0.040   # wrist pitch pivot to end-effector tip
-
-if _IKPY_AVAILABLE:
-    MOVEO_CHAIN = Chain(
-        name="moveo",
-        active_links_mask=[False, True, True, True, True, True, False],
-        links=[
-            OriginLink(),
-            # J1: waist — rotates about Z (yaw, swings arm left/right in X-Y plane)
-            URDFLink("j1", origin_translation=[0, 0, _L_BASE],  origin_orientation=[0,0,0], rotation=[0,0,1], bounds=(-2.00, 2.40)),
-            # J2: shoulder — rotates about X (pitch, swings upper arm in Y-Z plane)
-            #   At home (j2=0) upper arm points straight up along +Z
-            URDFLink("j2", origin_translation=[0, 0, 0],        origin_orientation=[0,0,0], rotation=[1,0,0], bounds=(-1.95, 1.95)),
-            # J3: elbow — upper arm length along Z; rotates about X
-            URDFLink("j3", origin_translation=[0, 0, _L_UPPER], origin_orientation=[0,0,0], rotation=[1,0,0], bounds=(-2.20, 2.20)),
-            # J4: wrist roll — forearm length along Z; rotates about Z (roll)
-            URDFLink("j4", origin_translation=[0, 0, _L_FORE],  origin_orientation=[0,0,0], rotation=[0,0,1], bounds=(-3.14, 3.14)),
-            # J5: wrist pitch — rotates about X
-            URDFLink("j5", origin_translation=[0, 0, 0],        origin_orientation=[0,0,0], rotation=[1,0,0], bounds=(-1.75, 1.75)),
-            # End effector (passive) — extends upward along Z
-            URDFLink("ee", origin_translation=[0, 0, _L_EE],    origin_orientation=[0,0,0], rotation=[0,0,0], bounds=(0, 0)),
-        ],
-    )
-else:
-    MOVEO_CHAIN = None
-
-# Max reachable distance from the shoulder pivot (0, 0, _L_BASE)
-_MAX_REACH = _L_UPPER + _L_FORE + _L_EE   # 0.464 m
 
 
 def solve_ik(xyz: list, current_joints: list = None) -> tuple:
@@ -108,8 +101,11 @@ def solve_ik(xyz: list, current_joints: list = None) -> tuple:
     #   j2 = atan2(r_h, dz) - atan2(L2*sin_j3, L1 + L2*cos_j3)
     #   j3 = signed elbow bend angle
     r_h    = _math.sqrt(x*x + y*y)   # horizontal distance to target
-    dz_sh  = z - _L_BASE              # height above shoulder pivot
-    L1, L2 = _L_UPPER, _L_FORE + _L_EE
+    # Height above the *shoulder pitch* (J2) axis. The 2R (j2/j3) starts at the J2 pivot,
+    # which is L_WAIST above the J1 origin.
+    dz_sh  = z - (_L_BASE + _L_WAIST)
+    # Effective forearm for 2R warm-start includes FORE + WRIST + EE (wrist straight).
+    L1, L2 = _L_UPPER, _L_FORE + _L_WRIST + _L_EE
     cos_j3 = max(-1.0, min(1.0, (r_h**2 + dz_sh**2 - L1**2 - L2**2) / (2*L1*L2)))
     sin_j3_abs = _math.sqrt(max(0.0, 1.0 - cos_j3**2))
     gamma  = _math.atan2(r_h, dz_sh)  # angle of target from vertical (+Z)
@@ -254,11 +250,29 @@ class JointPublisherNode(Node):
         self._pub = self.create_publisher(JointState, "/joint_commands", qos)
         self._speed_pub = self.create_publisher(Float32, "/speed_scale", qos)
         self._home_pub  = self.create_publisher(Float32, "/home_cmd", qos)
-        self.get_logger().info("moveo_publisher ready, advertising /joint_commands + /speed_scale + /home_cmd")
+        # Use default (RELIABLE) QoS for /joint_states so it matches standard subs (rsp, foxglove_ee, bridge)
+        # and is compatible with the reliable pub from foxglove_ee_to_joint_states.py.
+        self._state_pub = self.create_publisher(JointState, "/joint_states", 10)
+        # Subscribe to /joint_commands (from anywhere: TCP, direct pubs from GUI, tests)
+        # so we can keep _last_joints in sync and drive live /joint_states for viz.
+        best_effort = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+        self._cmd_sub = self.create_subscription(
+            JointState, "/joint_commands", self._on_external_command, best_effort
+        )
+        self.get_logger().info("moveo_publisher ready, advertising /joint_commands + /speed_scale + /home_cmd + /joint_states (for rsp/foxglove)")
         # Last successfully commanded angles — used to seed IK for continuity.
         # Protected by _joints_lock for thread safety.
         self._last_joints = [0.0] * 5
         self._joints_lock = threading.Lock()
+
+        # Periodic state publisher so /joint_states is always live (for rsp + Foxglove 3D)
+        # even when no new TCP commands are arriving. 10 Hz.
+        self._state_timer = self.create_timer(0.1, self._publish_current_state)
 
     def publish(self, angles: list):
         msg = JointState()
@@ -269,6 +283,16 @@ class JointPublisherNode(Node):
         with self._joints_lock:
             self._last_joints = list(msg.position)
         self.get_logger().info(f"published {[f'{a:.3f}' for a in angles]}")
+
+        # Mirror to /joint_states using URDF-matching names so robot_state_publisher
+        # and Foxglove 3D panel can render the arm at the commanded pose.
+        state = JointState()
+        state.header.stamp = msg.header.stamp
+        state.name = list(JOINT_NAMES_LONG)
+        state.position = [float(a) for a in angles]
+        state.velocity = [0.0] * 5
+        state.effort = [0.0] * 5
+        self._state_pub.publish(state)
 
     def publish_home(self):
         msg = Float32()
@@ -282,6 +306,29 @@ class JointPublisherNode(Node):
         msg.data = scale
         self._speed_pub.publish(msg)
         self.get_logger().info(f"speed_scale → {scale:.2f}")
+
+    def _publish_current_state(self):
+        """Timer callback: publish last commanded as /joint_states (URDF names) at ~10Hz.
+        Ensures rsp and Foxglove always have live joint state for 3D visualization.
+        """
+        with self._joints_lock:
+            angles = list(self._last_joints)
+        state = JointState()
+        state.header.stamp = self.get_clock().now().to_msg()
+        state.name = list(JOINT_NAMES_LONG)
+        state.position = angles
+        state.velocity = [0.0] * 5
+        state.effort = [0.0] * 5
+        self._state_pub.publish(state)
+
+    def _on_external_command(self, msg: JointState):
+        """Update _last_joints (and thus periodic /joint_states) for commands published externally
+        (e.g. from Mac GUI via SSH ros2 topic pub /joint_commands, or tests). Keeps viz in sync.
+        """
+        if len(getattr(msg, "position", [])) >= 5:
+            with self._joints_lock:
+                self._last_joints = [float(p) for p in msg.position[:5]]
+            self._publish_current_state()
 
 
 def serve(node: JointPublisherNode):

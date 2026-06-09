@@ -18,15 +18,18 @@ import math
 import shlex
 import sys
 import threading
+import time
+import urllib.request
 from dataclasses import dataclass
 
 import paramiko
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QSlider, QLineEdit, QPushButton, QGroupBox, QGridLayout,
-    QPlainTextEdit, QMessageBox,
+    QPlainTextEdit, QMessageBox, QSizePolicy,
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QObject
+from PyQt5.QtGui import QImage, QPixmap, QColor
 
 
 # ── Joint definitions ──────────────────────────────────────────────────────────
@@ -46,6 +49,8 @@ JOINTS = [
 
 SLIDER_SCALE   = 100   # slider integer units per radian
 PUBLISHER_PORT = 9000  # TCP port on the Pi where moveo_publisher.py listens
+PI_HOST        = "192.168.1.142"  # Pi IP (mDNS 'armpi.local' resolution is flaky; use IP)
+CAMERA_URL     = f"http://{PI_HOST}:8080/"  # MJPEG stream from the Pi camera
 
 
 # ── Worker ─────────────────────────────────────────────────────────────────────
@@ -54,46 +59,36 @@ class Worker(QObject):
     status        = pyqtSignal(str)   # "connected" | "disconnected" | error text
     angles_update = pyqtSignal(list)  # emitted after a cartesian IK response with solved angles
 
-    HOST = "armpi.local"
+    HOST = PI_HOST
     USER = "armpi"
 
     # Individual startup commands — run sequentially in connect() via _ssh_step()
     _CMD_KILL = (
-        # Use process NAME match (no -f) for micro_ros_agent so pkill doesn't
-        # accidentally match and kill the bash shell running this very command.
-        # For moveo_publisher (python3 process), match the .py filename which
-        # won't appear in our bash command's argv.
-        "pkill -9 micro_ros_agent 2>/dev/null; "
-        "pkill -9 -f 'moveo_publisher\\.py' 2>/dev/null; "
-        "sleep 1; "
-        "rm -f /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_* 2>/dev/null; "
-        'echo "[startup] old processes cleared"'
+        # Cleanup for Connect (light reconnect by default) using printf to write a temp script.
+        # This keeps the sent command as a single line (no \n in cmd value) to avoid any multi-line parsing issues in paramiko + remote bash -c.
+        # We now prefer to LEAVE the micro_ros_agent running as a persistent bridge.
+        "printf \"echo '[startup] cleanup: phase 0 - sourcing'\\n source /opt/ros/jazzy/setup.bash 2>/dev/null || source ~/microros_ws/install/setup.bash 2>/dev/null || true\\n echo '[startup] cleanup: phase 1 - /reboot kick to ESP (while agent stays alive)'\\n timeout 3s ros2 topic pub --once /reboot std_msgs/msg/Float32 '{data: 1.0}' >/dev/null 2>&1 || true; sleep 0.3\\n echo '[startup] cleanup: phase 2 - pkill non-agent nodes (keep micro_ros_agent running)'\\n pkill -9 -f 'moveo_publisher.py' 2>/dev/null || true\\n pkill -9 -f 'stereo_camera_node.py' 2>/dev/null || true\\n pkill -9 -f 'stereo_depth_node.py' 2>/dev/null || true\\n pkill -9 -f 'mjpeg_stream.py' 2>/dev/null || true\\n pkill -9 -f 'goto_object.py' 2>/dev/null || true\\n pkill -9 -f 'approach_object.py' 2>/dev/null || true\\n echo '[startup] cleanup: phase 3 - report tty holders (agent should be the only one)'\\n echo 'holders of /dev/ttyACM0:'; fuser /dev/ttyACM0 2>/dev/null || echo '(none or not visible)'\\n echo '[startup] cleanup: phase 4 - shm cleanup'\\n sleep 1\\n rm -f /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_* 2>/dev/null || true\\n echo '[startup] cleanup done - micro_ros_agent left running, ESP kicked via /reboot'\\n \" > /tmp/gui_cleanup.sh ; bash /tmp/gui_cleanup.sh"
     )
+
     _CMD_AGENT = (
-        # USB CDC serial transport — firmware uses set_microros_transports()
-        # which binds to Serial. Pi side runs the agent against /dev/ttyACM0.
-        # If /dev/ttyACM0 is missing the ESP32 either isn't plugged in or
-        # hasn't enumerated yet — wait briefly for it.
-        "export FASTDDS_BUILTIN_TRANSPORTS=UDPv4; "
-        "source ~/microros_ws/install/setup.bash; "
-        "for i in 1 2 3 4 5; do [ -e /dev/ttyACM0 ] && break; sleep 1; done; "
-        "if [ ! -e /dev/ttyACM0 ]; then "
-        '  echo "[startup] ERROR: /dev/ttyACM0 not present (ESP32 unplugged?)"; '
-        "  exit 1; "
-        "fi; "
-        "setsid ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyACM0 -b 115200 -v4 "
-        "  > /tmp/mra.log 2>&1 </dev/null & "
-        "sleep 3; "
-        "pgrep -c micro_ros_agent > /dev/null "
-        '  && echo "[startup] micro_ros_agent running (serial:/dev/ttyACM0)" '
-        '  || { echo "[startup] ERROR: agent not found"; cat /tmp/mra.log; }'
+        # Ensure the micro_ros_agent is running (light reconnect path) using printf to temp script (avoids quoting hell).
+        # We prefer to leave it running persistently so the ESP can use its built-in 3s retry / uros re-init logic after a /reboot kick.
+        # Only start a fresh one if it is not already running.
+        "printf \"export FASTDDS_BUILTIN_TRANSPORTS=UDPv4\\nsource ~/microros_ws/install/setup.bash 2>/dev/null || true\\nif pgrep -c micro_ros_agent > /dev/null; then\\n  echo '[startup] micro_ros_agent already running (persistent — ESP will re-handshake via its retry loop)'\\nelse\\n  echo '[startup] micro_ros_agent not running — starting it'\\n  for i in 1 2 3 4 5; do [ -e /dev/ttyACM0 ] && break; sleep 1; done\\n  if [ ! -e /dev/ttyACM0 ]; then echo '[startup] ERROR: /dev/ttyACM0 not present (ESP32 unplugged?)'; exit 1; fi\\n  setsid ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyACM0 -b 115200 -v4 > /tmp/mra.log 2>&1 </dev/null & \\n  sleep 3\\n  pgrep -c micro_ros_agent > /dev/null && echo '[startup] micro_ros_agent started (serial:/dev/ttyACM0)' || { echo '[startup] ERROR: agent not found after start'; cat /tmp/mra.log; }\\nfi\\n\" > /tmp/gui_ensure_agent.sh ; bash /tmp/gui_ensure_agent.sh"
     )
     _CMD_ESP32 = (
-        "sleep 4; "
-        "grep -m1 \"session established\" /tmp/mra.log "
-        '  && echo "[startup] ESP32 connected" '
-        '  || echo "[startup] WARNING: ESP32 not yet connected"; '
-        "tail -3 /tmp/mra.log"
+        # F-006 (light path): poll for the ESP client.
+        # With the agent left running, we only sent /reboot to kick the ESP firmware.
+        # The ESP's built-in retry (every ~3s) + uros re-init should re-handshake to the
+        # live agent. The poll mainly confirms it happened.
+        "timeout 32s bash -c '"
+        "for i in $(seq 1 30); do grep -q \"session established\\\\|datareader created\" /tmp/mra.log && break; sleep 1; done; "
+        "if grep -q \"session established\\\\|datareader created\" /tmp/mra.log; then "
+        "  echo \"[startup] ESP32 connected\"; "
+        "else "
+        "  echo \"[startup] WARNING: ESP32 not yet connected (will appear shortly; publisher side is already live)\"; "
+        "fi"
+        "' || echo \"[startup] esp32 poll timed out on remote (non-fatal; firmware retry loop runs every 3s)\""
     )
     _CMD_PUBLISHER = (
         "export FASTDDS_BUILTIN_TRANSPORTS=UDPv4; "
@@ -108,6 +103,16 @@ class Worker(QObject):
         "ss -tlnp 2>/dev/null | grep -q :9000 "
         '  && echo "[startup] moveo_publisher ready on :9000" '
         '  || { echo "[startup] ERROR: publisher failed"; cat /tmp/moveo_publisher.log; }'
+    )
+    _CMD_VISION = (
+        # Start the stereo camera node + browser MJPEG stream (detached).
+        # Camera streams raw (as-mounted) frames; the stream display-rotates for viewing.
+        "source /opt/ros/jazzy/setup.bash; "
+        "bash ~/vision/start_vision.sh > /tmp/vision_start.log 2>&1; "
+        "sleep 1; "
+        "pgrep -f stereo_camera_node > /dev/null "
+        '  && echo "[startup] vision up — view: http://armpi.local:8080/" '
+        '  || { echo "[startup] WARNING: vision not running"; cat /tmp/vision_start.log; }'
     )
 
     def __init__(self):
@@ -132,10 +137,11 @@ class Worker(QObject):
             self._transport = c.get_transport()
             self.log.emit("[SSH] connected — running startup script…")
 
-            self._ssh_step("kill",      self._CMD_KILL,      timeout=8)
+            self._ssh_step("cleanup",   self._CMD_KILL,      timeout=55)
             self._ssh_step("agent",     self._CMD_AGENT,     timeout=20)
-            self._ssh_step("esp32",     self._CMD_ESP32,     timeout=12)
+            self._ssh_step("esp32",     self._CMD_ESP32,     timeout=40)
             self._ssh_step("publisher", self._CMD_PUBLISHER, timeout=20)
+            self._ssh_step("vision",    self._CMD_VISION,    timeout=35)
 
             self._open_channel()
             self.connected = True
@@ -147,12 +153,20 @@ class Worker(QObject):
             self.connected = False
 
     def _ssh_step(self, label: str, cmd: str, timeout: int = 15):
-        """Run one SSH command and stream its output to the log."""
+        """Run one SSH command and stream its output to the log.
+        Polling steps (esp32 etc.) are wrapped in remote timeout so they always
+        produce a status line; this just makes any residual channel timeout look friendly.
+        """
         out, err, code = self._exec(cmd, timeout=timeout)
         combined = (out + err).strip()
         if combined:
+            # Print whatever output we captured (partial is better than nothing for long steps)
             for line in combined.splitlines():
                 self.log.emit(f"  {line}")
+            # If it was a channel timeout, append a non-scary note (the remote timeout wrapper
+            # should have forced exit and the || echo on the Pi side).
+            if "TimeoutError" in combined or "timeout" in combined.lower():
+                self.log.emit(f"  [startup/{label}] (paramiko channel read timed out; remote may have been slow but bounded)")
         elif code != 0:
             self.log.emit(f"  [startup/{label}] exited {code} (no output)")
 
@@ -228,6 +242,9 @@ class Worker(QObject):
                         fk_mm = resp.get("fk_err_mm")
                         suffix = f" (err {fk_mm:.1f}mm)" if fk_mm is not None else ""
                         self.log.emit(f"[IK] joints: {degs}{suffix}")
+                        if "achieved" in resp:
+                            ach = resp["achieved"]
+                            self.log.emit(f"[IK] achieved (solver model) x={ach[0]:.3f} y={ach[1]:.3f} z={ach[2]:.3f} m")
                     else:
                         self.log.emit("[ack] ok")
                 else:
@@ -284,14 +301,120 @@ class Worker(QObject):
                 code = stdout.channel.recv_exit_status()
                 return out, err, code
             except Exception as e:
-                # Include exception type so socket.timeout (empty str) is visible
+                # Include exception type so socket.timeout (empty str) is visible.
+                # Try to salvage any output produced before the timeout fired (important
+                # for long kill/startup commands that have remote timeout wrappers).
                 msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
-                return "", msg, -1
+                out = ""
+                err = msg
+                try:
+                    if stdout:
+                        out = stdout.read().decode("utf-8", errors="replace")
+                    if stderr:
+                        err += "\n" + stderr.read().decode("utf-8", errors="replace")
+                except Exception:
+                    pass
+                return out, err, -1
             finally:
                 for s in (stdin, stdout, stderr):
                     try:
                         if s: s.close()
                     except Exception: pass
+
+    def stream_approach_log(self):
+        """Tail ~/approach.log over SSH and mirror goto_object's progress into the
+        GUI log until it prints the finish sentinel (or a safety timeout)."""
+        path = f"/home/{self.USER}/approach.log"
+        try:
+            with self._ssh_lock:
+                ch = self._ssh.get_transport().open_session()
+                ch.exec_command(f"tail -n +1 -F {path} 2>/dev/null")
+            ch.settimeout(2.0)
+            buf = ""; t0 = time.time(); done = False
+            while not done and time.time() - t0 < 180:
+                try:
+                    data = ch.recv(4096).decode("utf-8", "replace")
+                except Exception:
+                    continue   # recv timeout — re-check the overall deadline
+                if not data:
+                    break
+                buf += data
+                while "\n" in buf:
+                    line, buf = buf.split("\n", 1)
+                    line = line.rstrip("\r")
+                    if not line.strip():
+                        continue
+                    i = line.find("[goto_object]: ")        # strip the ROS log prefix
+                    self.log.emit("[approach] " + (line[i + 15:] if i >= 0 else line))
+                    if "goto_object finished" in line:
+                        done = True; break
+            try: ch.close()
+            except Exception: pass
+        except Exception as e:
+            self.log.emit(f"[approach] (log stream error: {type(e).__name__})")
+
+
+# ── Camera worker ───────────────────────────────────────────────────────────────
+class CameraWorker(QObject):
+    """Reads an MJPEG stream over HTTP and emits decoded frames as QImage.
+
+    Runs in its own daemon thread; reconnects automatically on error. JPEG
+    frames are located by their SOI/EOI markers so it works with mjpg-streamer
+    style multipart streams regardless of the boundary string.
+    """
+    frame  = pyqtSignal(QImage)
+    status = pyqtSignal(str)   # human-readable connection state
+
+    def __init__(self, url: str):
+        super().__init__()
+        self.url = url
+        self._running = False
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def stop(self):
+        self._running = False
+
+    def _run(self):
+        while self._running:
+            try:
+                self.status.emit("connecting…")
+                stream = urllib.request.urlopen(self.url, timeout=5)
+                self.status.emit("")
+                buf = b""
+                while self._running:
+                    chunk = stream.read(4096)
+                    if not chunk:
+                        break               # stream ended — reconnect
+                    buf += chunk
+                    start = buf.find(b"\xff\xd8")          # JPEG SOI
+                    end   = buf.find(b"\xff\xd9", start + 2) if start != -1 else -1
+                    if start != -1 and end != -1:
+                        jpg = buf[start:end + 2]
+                        buf = buf[end + 2:]
+                        img = QImage.fromData(jpg, "JPG")
+                        if not img.isNull():
+                            self.frame.emit(img)
+                    # Guard against runaway growth if markers never align
+                    if len(buf) > 2_000_000:
+                        buf = buf[-1_000_000:]
+            except Exception as e:
+                if self._running:
+                    self.status.emit(f"offline — {e}")
+                    time.sleep(2)
+
+
+# ── Clickable camera label ──────────────────────────────────────────────────────
+class ClickableLabel(QLabel):
+    """QLabel that emits the click position (in pixmap pixels) on mouse press."""
+    clicked = pyqtSignal(int, int)
+
+    def mousePressEvent(self, e):
+        self.clicked.emit(int(e.x()), int(e.y()))
 
 
 # ── Main window ───────────────────────────────────────────────────────────────
@@ -299,7 +422,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Moveo Arm — Simple Controller")
-        self.resize(820, 680)
+        self.resize(1140, 700)
 
         self._worker = Worker()
         self._worker.log.connect(self._append_log)
@@ -374,6 +497,18 @@ class MainWindow(QMainWindow):
 
         vlay.addWidget(joints_box)
 
+        # F-007: FK calculation button (displays x,y,z of EE from current joints via FK)
+        # Placed near joints section as per spec. Pure sim/GUI, no hardware/SSH needed.
+        fk_box = QGroupBox("FK (EE from joints)")
+        fkh = QHBoxLayout(fk_box)
+        self._fk_btn = QPushButton("Compute FK")
+        self._fk_btn.clicked.connect(self._compute_fk)
+        self._fk_label = QLabel("x=0.000 y=0.000 z=0.000 m")
+        fkh.addWidget(self._fk_btn)
+        fkh.addWidget(self._fk_label)
+        fkh.addStretch()
+        vlay.addWidget(fk_box)
+
         # Speed control
         speed_box = QGroupBox("Speed")
         sh = QHBoxLayout(speed_box)
@@ -428,6 +563,10 @@ class MainWindow(QMainWindow):
         )
         self._btn_set_home.clicked.connect(self._set_as_home)
 
+        self._btn_stop_approach = QPushButton("✋ Stop Approach")
+        self._btn_stop_approach.setToolTip("Stop the click-to-go visual approach")
+        self._btn_stop_approach.clicked.connect(self._stop_approach)
+
         self._btn_estop = QPushButton("⛔  E-STOP")
         self._btn_estop.setStyleSheet(
             "background:#c0392b; color:white; font-weight:bold; padding:6px;"
@@ -438,8 +577,12 @@ class MainWindow(QMainWindow):
         action_row.addWidget(self._btn_home)
         action_row.addWidget(self._btn_set_home)
         action_row.addStretch()
+        action_row.addWidget(self._btn_stop_approach)
         action_row.addWidget(self._btn_estop)
         vlay.addLayout(action_row)
+
+        # Bottom row: console (left half) + camera viewer (right half)
+        bottom_row = QHBoxLayout()
 
         # Console
         console_box = QGroupBox("Console")
@@ -450,15 +593,164 @@ class MainWindow(QMainWindow):
         self._console.setStyleSheet(
             "background:#1e1e1e; color:#d4d4d4; font-family:Menlo,monospace; font-size:12px;"
         )
-        self._console.setFixedHeight(220)
+        self._console.setMinimumHeight(220)
         cv.addWidget(self._console)
         btn_clear = QPushButton("Clear")
         btn_clear.setFixedWidth(70)
         btn_clear.clicked.connect(self._console.clear)
         cv.addWidget(btn_clear, alignment=Qt.AlignRight)
-        vlay.addWidget(console_box)
+        bottom_row.addWidget(console_box, 1)
+
+        # Camera viewer — width hugs the stream (no side letterboxing)
+        cam_box = QGroupBox("Camera")
+        cam_box.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        camv = QVBoxLayout(cam_box)
+        self._cam_label = ClickableLabel("camera:\nclick an object to go to it")
+        self._cam_label.clicked.connect(self._on_camera_click)
+        self._cam_label.setCursor(Qt.CrossCursor)
+        self._cam_label.setAlignment(Qt.AlignCenter)
+        self._cam_label.setMinimumSize(160, 120)
+        self._cam_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Ignored)
+        self._cam_label.setStyleSheet("background:#000; color:#888;")
+        camv.addWidget(self._cam_label)
+        bottom_row.addWidget(cam_box, 0)
+
+        vlay.addLayout(bottom_row)
 
         self._set_controls_enabled(False)
+
+        # Start the camera stream (independent of the SSH/ROS connection)
+        self._last_frame: QImage | None = None
+        self._camera = CameraWorker(CAMERA_URL)
+        self._camera.frame.connect(self._on_camera_frame)
+        self._camera.status.connect(self._on_camera_status)
+        self._camera.start()
+
+    def _on_camera_frame(self, img: QImage):
+        self._last_frame = img
+        self._update_camera_pixmap()
+
+    def _on_camera_status(self, msg: str):
+        if msg:
+            self._cam_label.setText(f"camera: {msg}")
+
+    def _update_camera_pixmap(self):
+        if self._last_frame is None or self._last_frame.isNull():
+            return
+        # Lock the panel to a 4:3 box (width = height * 4/3, driven by the
+        # console height). Fill it by expanding + centre-cropping so there are
+        # no black side bars and no distortion.
+        h = max(self._cam_label.height(), 120)
+        w = round(h * 4 / 3)
+        self._cam_label.setFixedWidth(w)
+        pm = QPixmap.fromImage(self._last_frame).scaled(
+            w, h, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+        )
+        if pm.width() != w or pm.height() != h:
+            x = (pm.width()  - w) // 2
+            y = (pm.height() - h) // 2
+            pm = pm.copy(x, y, w, h)
+        self._cam_label.setPixmap(pm)
+
+    # ── Click-to-go visual approach ─────────────────────────────────────────────
+    # TEST MODE: clicking the image jogs the arm a small amount to centre that
+    # pixel — for verifying the j1 (yaw) / j5 (pitch) direction matches the image.
+    # Flip JOG_SIGN_J1 / J5 below if the arm moves the wrong way. To restore the
+    # full go-to, point this at self._start_goto_object instead.
+    JOG_SIGN_J1 = -1.0   # +dx (click right) -> -j1 (yaw camera right) by default
+    JOG_SIGN_J5 = +1.0   # +dy (click below center) -> +j5
+    JOG_MAX_J1  = 0.15   # rad at a full-edge horizontal click
+    JOG_MAX_J5  = 0.15   # rad at a full-edge vertical click
+
+    def _jog_to_click(self, x, y):     # rename to _on_camera_click to use the jog test
+        if not self._worker.connected:
+            self._append_log("[jog] connect SSH first"); return
+        if self._estop:
+            self._append_log("[jog] release E-STOP first"); return
+        pm = self._cam_label.pixmap()
+        if pm is None or pm.isNull() or pm.width() <= 0 or pm.height() <= 0:
+            self._append_log("[jog] no camera image"); return
+        w, h = pm.width(), pm.height()
+        dx = (x - w / 2.0) / (w / 2.0)        # -1 (left edge) .. +1 (right edge)
+        dy = (y - h / 2.0) / (h / 2.0)        # -1 (top)       .. +1 (bottom)
+        dj1 = self.JOG_SIGN_J1 * self.JOG_MAX_J1 * dx
+        dj5 = self.JOG_SIGN_J5 * self.JOG_MAX_J5 * dy
+        angles = [self._sliders[i].value() / SLIDER_SCALE for i in range(len(JOINTS))]
+        angles[0] += dj1                      # j1 yaw  (horizontal)
+        angles[4] += dj5                      # j5 pitch (vertical)
+        self._append_log(f"[jog] click ({x},{y}) dx={dx:+.2f} dy={dy:+.2f} -> "
+                         f"dj1={dj1:+.3f} dj5={dj5:+.3f}")
+        self._on_ik_angles(angles)            # sync sliders/textboxes to the new pose
+        threading.Thread(target=lambda: self._worker.send_angles(angles), daemon=True).start()
+
+    def _on_camera_click(self, x, y):
+        """Full click-to-go: center (fresh-frame servo) + camera-mount cartesian."""
+        if not self._worker.connected:
+            self._append_log("[approach] connect SSH first"); return
+        if self._estop:
+            self._append_log("[approach] release E-STOP first"); return
+        lo, hi = self._sample_hsv(x, y)
+        if lo is None:
+            self._append_log("[approach] click directly on a COLORED object"); return
+        self._append_log(f"[approach] going to object  HSV {lo}-{hi}, stop ~22cm  (✋ to abort)")
+        angles = [self._sliders[i].value() / SLIDER_SCALE for i in range(len(JOINTS))]
+        cmd = (f"bash ~/vision/run_approach_object.sh "
+               f"{lo[0]} {lo[1]} {lo[2]} {hi[0]} {hi[1]} {hi[2]} 0.22")
+
+        def _go():
+            self._worker.send_angles(angles)
+            time.sleep(0.5)
+            self._worker._exec(cmd, timeout=15)
+            self._worker.stream_approach_log()
+        threading.Thread(target=_go, daemon=True).start()
+
+    def _sample_hsv(self, x, y):
+        """Average a small patch at the click and return OpenCV HSV lo/hi range."""
+        pm = self._cam_label.pixmap()
+        if pm is None or pm.isNull():
+            return None, None
+        img = pm.toImage()
+        w, h = img.width(), img.height()
+        if not (0 <= x < w and 0 <= y < h):
+            return None, None
+        r = g = b = n = 0
+        for dx in range(-3, 4):
+            for dy in range(-3, 4):
+                px, py = x + dx, y + dy
+                if 0 <= px < w and 0 <= py < h:
+                    c = img.pixelColor(px, py)
+                    r += c.red(); g += c.green(); b += c.blue(); n += 1
+        col = QColor(r // n, g // n, b // n)
+        hh, ss, vv, _ = col.getHsv()            # h 0-359 (-1 if gray), s/v 0-255
+        if hh < 0 or ss < 40:
+            return None, None                   # achromatic — not color-trackable
+        hcv = hh // 2                           # OpenCV hue 0-179
+        # dh=18: wider than the 12 we used before to account for JPEG compression
+        # and the rectification/resize pipeline shifting colors in the depth node.
+        # Red/magenta wraps at 0/179 in OpenCV hue; clamp both ends rather than
+        # letting the range go negative or overflow — the depth node handles wrap.
+        dh, ds, dv = 18, 80, 80
+        lo = [max(0,   hcv - dh), max(20,  ss - ds), max(20,  vv - dv)]
+        hi = [min(179, hcv + dh), min(255, ss + ds), min(255, vv + dv)]
+        return lo, hi
+
+    def _stop_approach(self):
+        if self._worker.connected:
+            threading.Thread(target=lambda: self._worker._exec(
+                "pkill -9 -f 'approach_object.py|goto_object.py|approach_servo.py|stereo_depth_node.py' 2>/dev/null", timeout=8),
+                daemon=True).start()
+        self._append_log("[approach] stop sent")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_camera_pixmap()
+
+    def closeEvent(self, event):
+        try:
+            self._camera.stop()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
     def _on_ik_angles(self, angles: list):
         """Sync sliders and internal state after a successful IK command."""
@@ -568,6 +860,29 @@ class MainWindow(QMainWindow):
             self._sliders[i].blockSignals(False)
             self._textboxes[i].setText("0.000")
         self._dispatch([0.0] * 5, force=True)
+
+    def _compute_fk(self):
+        """F-007: Compute and display EE (x,y,z) via FK from current joints.
+        Uses the forward_kinematics helper from the single-source kinematics.py.
+        Returns coordinates in the same user frame as IK targets (+X forward, +Y left).
+        No hardware, no SSH, no regression to IK/send paths.
+        """
+        import sys
+        import os
+        # Ensure we can find the sibling kinematics.py (pure, no ROS/rclpy at all)
+        gui_dir = os.path.dirname(os.path.abspath(__file__))
+        if gui_dir not in sys.path:
+            sys.path.insert(0, gui_dir)
+        try:
+            from kinematics import forward_kinematics
+        except Exception:
+            self._fk_label.setText("FK unavailable (ikpy not installed — re-run the Launch Simple Controller.command or bash software/mac-gui/install_dependencies.sh)")
+            return
+        try:
+            x, y, z = forward_kinematics(self._angles)
+            self._fk_label.setText(f"x={x:.3f} y={y:.3f} z={z:.3f} m")
+        except Exception as e:
+            self._fk_label.setText(f"FK error: {e}")
 
     def _set_as_home(self):
         """Declare current physical position as home — zeros ESP32 counters without moving."""

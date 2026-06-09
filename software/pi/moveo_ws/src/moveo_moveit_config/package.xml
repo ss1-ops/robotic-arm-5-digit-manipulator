@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>moveo_moveit_config</name>
+  <version>0.0.1</version>
+  <description>MoveIt 2 configuration for the Moveo robotic arm</description>
+  <maintainer email="armpi@todo.todo">armpi</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <exec_depend>moveit_ros_move_group</exec_depend>
+  <exec_depend>moveit_kinematics</exec_depend>
+  <exec_depend>moveit_planners_ompl</exec_depend>
+  <exec_depend>moveit_ros_visualization</exec_depend>
+  <exec_depend>moveo_description</exec_depend>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
