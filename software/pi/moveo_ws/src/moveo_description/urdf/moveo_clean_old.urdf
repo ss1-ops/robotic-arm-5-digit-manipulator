@@ -1,0 +1,149 @@
+<?xml version="1.0"?>
+<robot name="moveo">
+
+  <!-- Base -->
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.13" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://moveo_urdf/meshes/base_link.STL"/>
+      </geometry>
+      <material name="">
+        <color rgba="0.75 0.75 0.75 1"/>
+      </material>
+    </visual>
+  </link>
+
+  <!-- Joint 1 - Shoulder (Yaw) -->
+  <joint name="Joint_1" type="revolute">
+    <origin xyz="0 0 0.13" rpy="0 0 0"/>
+    <parent link="base_link"/>
+    <child link="Link_1"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.14" upper="3.14" effort="10" velocity="2"/>
+  </joint>
+
+  <link name="Link_1">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://moveo_urdf/meshes/Link_1.STL"/>
+      </geometry>
+      <material name="">
+        <color rgba="0.75 0.75 0.75 1"/>
+      </material>
+    </visual>
+  </link>
+
+  <!-- Joint 2 - Shoulder Pitch -->
+  <joint name="Joint_2" type="revolute">
+    <origin xyz="0 0.18 0" rpy="0 1.57 0"/>
+    <parent link="Link_1"/>
+    <child link="Link_2"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.0" upper="2.0" effort="10" velocity="2"/>
+  </joint>
+
+  <link name="Link_2">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://moveo_urdf/meshes/Link_2.STL"/>
+      </geometry>
+      <material name="">
+        <color rgba="0.75 0.75 0.75 1"/>
+      </material>
+    </visual>
+  </link>
+
+  <!-- Joint 3 - Elbow -->
+  <joint name="Joint_3" type="revolute">
+    <origin xyz="0 0 -0.22" rpy="0 0 0"/>
+    <parent link="Link_2"/>
+    <child link="Link_3"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.0" upper="2.0" effort="10" velocity="2"/>
+  </joint>
+
+  <link name="Link_3">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://moveo_urdf/meshes/Link_3.STL"/>
+      </geometry>
+      <material name="">
+        <color rgba="0.75 0.75 0.75 1"/>
+      </material>
+    </visual>
+  </link>
+
+  <!-- Joint 4 - Wrist Roll -->
+  <joint name="Joint_4" type="revolute">
+    <origin xyz="0.17 0 0" rpy="0 0 1.57"/>
+    <parent link="Link_3"/>
+    <child link="Link_4"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.14" upper="3.14" effort="5" velocity="2"/>
+  </joint>
+
+  <link name="Link_4">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://moveo_urdf/meshes/Link_4.STL"/>
+      </geometry>
+      <material name="">
+        <color rgba="0.3 0.3 0.3 1"/>
+      </material>
+    </visual>
+  </link>
+
+  <!-- Joint 5 - Wrist Pitch -->
+  <joint name="Joint_5" type="revolute">
+    <origin xyz="0 0.05 0" rpy="0 0 0"/>
+    <parent link="Link_4"/>
+    <child link="Link_5"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.0" upper="2.0" effort="5" velocity="2"/>
+  </joint>
+
+  <link name="Link_5">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://moveo_urdf/meshes/Link_5.STL"/>
+      </geometry>
+      <material name="">
+        <color rgba="0.79 0.82 0.93 1"/>
+      </material>
+    </visual>
+  </link>
+
+  <!-- ros2_control -->
+  <ros2_control name="MoveoHardware" type="system">
+    <hardware>
+      <plugin>mock_components/GenericSystem</plugin>
+    </hardware>
+    <joint name="Joint_1">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+    </joint>
+    <joint name="Joint_2">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+    </joint>
+    <joint name="Joint_3">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+    </joint>
+    <joint name="Joint_4">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+    </joint>
+    <joint name="Joint_5">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+    </joint>
+  </ros2_control>
+
+</robot>
